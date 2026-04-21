@@ -1,0 +1,18 @@
+coverage.out
+*.prof
+
+.openspec-auto-backup/
+
+.openspec-auto/
+
+# Harness: 本地工具与 Agent 运行产物
+.harness/
+.idea/
+.DS_Store
+openspec/
+tools/
+.codex/
+.claude/
+.agents/
+AGENTS.md
+CLAUDE.md

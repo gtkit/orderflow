@@ -1,0 +1,268 @@
+package orderflow
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net"
+	"time"
+)
+
+// Create 入参的字段上限。取值贴合底层 DB 列与支付网关实际限制：
+//   - product_title varchar(255)，微信 Subject 限 128 字节；
+//   - product_type varchar(32)；pay_method varchar(32)；
+//   - client_ip varbinary(16) 存 IPv4/IPv6 二进制，长度上限由 net.ParseIP 保证。
+const (
+	maxCreateProductTitleLen = 128
+	maxCreateProductTypeLen  = 32
+	maxCreatePayMethodLen    = 32
+)
+
+// Create 创建订单并请求支付。
+//
+// 典型流程：
+//  1. 查找同用户 + 同商品的 Pending 订单；
+//     - 若存在且 IsReusable -> 直接复用，重新请求支付参数；
+//     - 若存在但不可复用 -> 关闭旧单再建新单（期间若支付抢跑，返回当前订单）；
+//  2. 生成订单号 / token，落库；
+//  3. 入延时队列（用于支付超时自动关闭）；失败则自我保护式关闭；
+//  4. 写 Pending 状态缓存 + 触发 OnCreated 钩子；
+//  5. 调用支付网关 UnifiedOrder 获取客户端拉起参数。
+//
+// 错误返回：
+//   - 入参非法（UserID / Product.ID 为 0）-> ErrInvalidConfig
+//   - Store / Gateway / DelayQueue 报错 -> 原样包装
+func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *CreateResult[O], err error) {
+	start := time.Now()
+	defer func() {
+		e.observer.Duration(ctx, OpCreate, time.Since(start), err)
+	}()
+
+	if req.UserID == 0 {
+		return nil, fmt.Errorf("%w: UserID must not be zero", ErrInvalidConfig)
+	}
+	if req.Product.ID == 0 {
+		return nil, fmt.Errorf("%w: Product.ID must not be zero", ErrInvalidConfig)
+	}
+	if n := len(req.Product.Title); n == 0 || n > maxCreateProductTitleLen {
+		return nil, fmt.Errorf("%w: Product.Title length %d not in [1, %d]", ErrInvalidConfig, n, maxCreateProductTitleLen)
+	}
+	if len(req.Product.Type) > maxCreateProductTypeLen {
+		return nil, fmt.Errorf("%w: Product.Type length %d exceeds %d", ErrInvalidConfig, len(req.Product.Type), maxCreateProductTypeLen)
+	}
+	if n := len(req.PayMethod); n == 0 || n > maxCreatePayMethodLen {
+		return nil, fmt.Errorf("%w: PayMethod length %d not in [1, %d]", ErrInvalidConfig, n, maxCreatePayMethodLen)
+	}
+	if req.ClientIP != "" && net.ParseIP(req.ClientIP) == nil {
+		return nil, fmt.Errorf("%w: ClientIP %q is not a valid IP address", ErrInvalidConfig, req.ClientIP)
+	}
+
+	// 可选分布式锁：配置 Locker 后，同用户同商品的 Create 串行化。
+	// defer unlock 在 ok=false / err 非 nil 时也无害（Locker 契约要求 unlock 幂等）。
+	if e.locker != nil {
+		lockKey := fmt.Sprintf("orderflow:create:%d:%d", req.UserID, req.Product.ID)
+		unlock, ok, lockErr := e.locker.TryLock(ctx, lockKey, e.createLockTTL)
+		if lockErr != nil {
+			err = fmt.Errorf("orderflow: acquire create lock: %w", lockErr)
+			return nil, err
+		}
+		defer unlock()
+		if !ok {
+			err = ErrConcurrentCreate
+			return nil, err
+		}
+	}
+
+	existing, found, err := e.store.FindPendingByUserAndProduct(ctx, req.UserID, req.Product.ID)
+	if err != nil {
+		return nil, fmt.Errorf("orderflow: find pending order: %w", err)
+	}
+	if found {
+		if e.isReusableOf(existing, req) {
+			e.observer.Event(ctx, EventOrderReused, existing.OrderNo(), nil)
+			return e.requestPayment(ctx, existing, true)
+		}
+		current, hasCurrent, supErr := e.closeSuperseded(ctx, existing, req.Product.ID)
+		if supErr != nil {
+			err = fmt.Errorf("orderflow: close superseded: %w", supErr)
+			return nil, err
+		}
+		if hasCurrent {
+			return &CreateResult[O]{Order: current, Reused: true}, nil
+		}
+	}
+
+	orderNo := e.generateOrderNo()
+	orderToken := e.generateOrderToken(orderNo, req.UserID, req.Product.ID)
+	expireAt := time.Now().Add(e.orderExpire)
+
+	spec := OrderSpec{
+		OrderNo:       orderNo,
+		OrderToken:    orderToken,
+		UserID:        req.UserID,
+		Status:        StatusPending,
+		ProductID:     req.Product.ID,
+		ProductType:   req.Product.Type,
+		ProductTitle:  req.Product.Title,
+		OriginalPrice: req.Product.Price,
+		DiscountPrice: 0,
+		PayAmount:     req.Product.Price,
+		PayMethod:     req.PayMethod,
+		ChannelID:     req.ChannelID,
+		ExpireAt:      expireAt,
+		ClientIP:      req.ClientIP,
+		Extra:         req.Product.Extra,
+	}
+
+	order, createErr := e.store.Create(ctx, spec)
+	if createErr != nil {
+		err = fmt.Errorf("orderflow: create order: %w", createErr)
+		return nil, err
+	}
+	e.appendLog(ctx, order, StatusPending, StatusPending, "system", "created")
+	e.observer.Event(ctx, EventOrderCreated, order.OrderNo(), map[string]any{
+		"user_id":    order.UserID(),
+		"product_id": order.ProductID(),
+	})
+
+	if _, enqErr := e.delayQueue.Enqueue(ctx, orderNo, expireAt); enqErr != nil {
+		e.rollbackPendingOnEnqueueFail(ctx, order, expireAt)
+		err = fmt.Errorf("orderflow: enqueue delay close: %w", enqErr)
+		return nil, err
+	}
+
+	if setErr := e.cache.Set(ctx, orderToken, req.UserID, StatusPending, expireAt); setErr != nil {
+		e.logger.WarnContext(ctx, "orderflow: set pending status cache failed",
+			slog.String("order_token", orderToken),
+			slog.Any("error", setErr),
+		)
+	}
+
+	if e.onCreated != nil {
+		if hookErr := e.onCreated(ctx, order); hookErr != nil {
+			e.logger.WarnContext(ctx, "orderflow: OnCreated hook returned error",
+				slog.String("order_no", orderNo),
+				slog.Any("error", hookErr),
+			)
+		}
+	}
+
+	result, err = e.requestPayment(ctx, order, false)
+	return result, err
+}
+
+// rollbackPendingOnEnqueueFail 在延时队列入队失败时，把刚落库的 Pending 订单自我保护式关闭。
+// 否则这单永远不会被关闭，占坑影响"一用户一商品一 Pending"的不变量。
+//
+// 失败路径说明：如果 CAS 也失败（DB 短时不可用），此订单暂时成为"孤儿 Pending"——
+// 不在延时队列、状态仍是 Pending。兜底机制：`CloseFallback` 会扫描 DB 中过期 Pending
+// 并关掉它。为了让运维能对账 fallback 回收路径，这里把失败路径显式记日志。
+func (e *Engine[O]) rollbackPendingOnEnqueueFail(ctx context.Context, order O, expireAt time.Time) {
+	affected, err := e.store.CASClose(ctx, order.OrderNo())
+	if err != nil {
+		e.logger.ErrorContext(ctx, "orderflow: rollback CAS close failed, order will be reaped by CloseFallback scanner",
+			slog.String("order_no", order.OrderNo()),
+			slog.Any("error", err),
+		)
+		return
+	}
+	if affected == 0 {
+		e.logger.WarnContext(ctx, "orderflow: rollback CAS close missed (state changed concurrently)",
+			slog.String("order_no", order.OrderNo()),
+		)
+		return
+	}
+	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusClosed, expireAt)
+	e.appendLog(ctx, order, StatusPending, StatusClosed, "system", "closed: delay queue enqueue failed")
+	e.observer.Event(ctx, EventOrderClosed, order.OrderNo(), map[string]any{
+		"reason": string(ClosedReasonEnqueueFail),
+	})
+	if e.onClosed != nil {
+		e.onClosed(ctx, order, ClosedReasonEnqueueFail)
+	}
+}
+
+// closeSuperseded 在用户发起新订单时关闭旧 Pending 单。
+//
+// 返回值语义：
+//   - err != nil：网关关闭失败或存储错误，调用方应中断；
+//   - hasCurrent == true：CAS 抢跑失败（典型：支付回调先一步把订单 Paid），调用方应把 current 作为结果返回给客户端；
+//   - hasCurrent == false：旧单已成功关闭，调用方可以继续创建新单。
+func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductID uint64) (current O, hasCurrent bool, err error) {
+	var zero O
+	if err := e.afterClose(ctx, existing); err != nil {
+		e.appendLog(ctx, existing, StatusPending, StatusPending, "system",
+			"gateway close failed during replacement: "+err.Error())
+		return zero, false, err
+	}
+
+	affected, casErr := e.store.CASClose(ctx, existing.OrderNo())
+	if casErr != nil {
+		return zero, false, fmt.Errorf("cas close superseded: %w", casErr)
+	}
+	if affected == 0 {
+		refreshed, found, qErr := e.store.GetByNo(ctx, existing.OrderNo())
+		if qErr != nil {
+			return zero, false, fmt.Errorf("recheck superseded after race: %w", qErr)
+		}
+		if !found {
+			return zero, false, nil
+		}
+		// Closed / Cancelled 意味着本次关闭已生效（或等效），可继续创建新单。
+		if refreshed.Status() == StatusClosed || refreshed.Status() == StatusCancelled {
+			return zero, false, nil
+		}
+		if refreshed.Status() == StatusPaid {
+			e.appendLog(ctx, refreshed, StatusPending, StatusPaid, "system",
+				"payment won race during replacement close")
+		}
+		return refreshed, true, nil
+	}
+
+	_ = e.delayQueue.Remove(ctx, existing.OrderNo())
+	e.publishStatus(ctx, existing.OrderToken(), existing.UserID(), StatusClosed, existing.ExpireAt())
+	e.appendLog(ctx, existing, StatusPending, StatusClosed, "system",
+		fmt.Sprintf("superseded by new product %d", newProductID))
+
+	e.observer.Event(ctx, EventOrderSuperseded, existing.OrderNo(), map[string]any{
+		"new_product_id": newProductID,
+	})
+	e.observer.Event(ctx, EventOrderClosed, existing.OrderNo(), map[string]any{
+		"reason": string(ClosedReasonSuperseded),
+	})
+	if e.onSuperseded != nil {
+		e.onSuperseded(ctx, existing, newProductID)
+	}
+	if e.onClosed != nil {
+		e.onClosed(ctx, existing, ClosedReasonSuperseded)
+	}
+	return zero, false, nil
+}
+
+// requestPayment 调用支付网关下单，返回客户端拉起支付所需参数。
+func (e *Engine[O]) requestPayment(ctx context.Context, order O, reused bool) (*CreateResult[O], error) {
+	channel := e.resolveChannelOf(order.PayMethod())
+	notifyURL := e.buildNotifyURLOf(channel)
+
+	resp, err := e.gateway.UnifiedOrder(ctx, channel, UnifiedOrderRequest{
+		OutTradeNo:  order.OrderNo(),
+		TotalAmount: order.PayAmount(),
+		Subject:     order.ProductTitle(),
+		NotifyURL:   notifyURL,
+		ExpireAt:    order.ExpireAt(),
+		Metadata: map[string]string{
+			"order_token": order.OrderToken(),
+		},
+	})
+	if err != nil {
+		e.appendLog(ctx, order, order.Status(), order.Status(), "system",
+			"payment request failed: "+err.Error())
+		return nil, fmt.Errorf("orderflow: gateway unified order: %w", err)
+	}
+
+	return &CreateResult[O]{
+		Order:         order,
+		PaymentParams: resp.AppParams,
+		Reused:        reused,
+	}, nil
+}

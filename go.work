@@ -1,0 +1,24 @@
+// orderflow 多 module 仓库的本地 workspace。
+//
+// 用途：让 drivers/*/ 的 go.mod 中 "require github.com/gtkit/orderflow vX.Y.Z" 在
+// 本地开发/CI 阶段解析到当前目录，而无需 tag 或 replace 污染各 driver go.mod。
+//
+// 设计：
+//   - drivers/* 进入 use 列表，成为 workspace 成员；
+//   - 根 orderflow 不进入 use 列表，只通过 replace 指令供 drivers 引用——
+//     这样 `go test` 直接在根目录跑核心包时走正常 module 模式（和发布消费者一致），
+//     只有 drivers 需要本地 orderflow 时才走 workspace 解析；
+//   - driver go.mod 保持 **无 replace 指令**，scripts/check-release.sh 继续生效。
+//
+// 发版后：消费者不会读此 go.work，直接从 Go module proxy 拉 tag 对应版本。
+go 1.26.2
+
+use (
+	./drivers/paymgrgw
+	./drivers/gormstore
+	./drivers/rediscache
+	./drivers/rediszq
+)
+
+// workspace-level replace：driver 引用的 orderflow 解析到本地根目录。
+replace github.com/gtkit/orderflow => .
