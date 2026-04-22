@@ -674,7 +674,7 @@ type onAnomalyCall struct {
 }
 
 type testEnv struct {
-	t      *testing.T
+	t      testing.TB
 	engine *Engine[*testOrder]
 
 	store  *fakeStore
@@ -696,7 +696,7 @@ type testEnv struct {
 	OnPaidErr error
 }
 
-func newTestEnv(t *testing.T) *testEnv {
+func newTestEnv(t testing.TB) *testEnv {
 	t.Helper()
 	env := &testEnv{
 		t:      t,
