@@ -35,3 +35,7 @@ orderflow/
 ## 本地开发
 
 sleep_client 的 `go.work` 同时 `use` 了核心包和 driver 子模块。各 driver 的 `go.mod` 通过 `replace github.com/gtkit/orderflow => ../..` 保证脱离 workspace 也能独立构建。正式 tag 时需同步把 `require` 里的核心包版本号升到对应版本。
+
+## 发版与依赖维护
+
+完整的依赖维护、版本号规则、发版流程和自检清单参见 [RELEASING.md](./RELEASING.md)。
