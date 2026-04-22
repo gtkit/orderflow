@@ -1,6 +1,6 @@
 module github.com/gtkit/orderflow/drivers/rediszq
 
-go 1.26.2
+go 1.26
 
 require (
 	github.com/alicebob/miniredis/v2 v2.37.0
