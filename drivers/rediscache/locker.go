@@ -67,13 +67,17 @@ func (l *Locker) TryLock(ctx context.Context, key string, ttl time.Duration) (fu
 	}
 	fullKey := l.keyPrefix + key
 
-	ok, err := l.rdb.SetNX(ctx, fullKey, token, ttl).Result()
+	// SET key token NX EX ttl。NX 失败（key 已存在）会返回 redis.Nil，不是普通错误。
+	_, err = l.rdb.SetArgs(ctx, fullKey, token, redis.SetArgs{
+		Mode: "NX",
+		TTL:  ttl,
+	}).Result()
 	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			// 锁被占——no-op unlock，ok=false
+			return func() {}, false, nil
+		}
 		return func() {}, false, fmt.Errorf("rediscache/locker: SET NX: %w", err)
-	}
-	if !ok {
-		// 锁被占——no-op unlock，ok=false
-		return func() {}, false, nil
 	}
 
 	// 持锁成功，返回自己的 unlock
@@ -122,14 +126,17 @@ func IdempotentOnPaidViaRedis[O orderflow.OrderSnapshot](
 	}
 	return func(ctx context.Context, o O, n orderflow.NotifyResult) error {
 		key := keyPrefix + o.OrderNo()
-		// 尝试占位：成功 → 首次调用；失败 → 已被处理过
-		ok, err := rdb.SetNX(ctx, key, "1", ttl).Result()
+		// 尝试占位：SET NX EX。NX 失败（已存在）返回 redis.Nil，视为"已被处理过"。
+		_, err := rdb.SetArgs(ctx, key, "1", redis.SetArgs{
+			Mode: "NX",
+			TTL:  ttl,
+		}).Result()
 		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				// 已有标记，跳过
+				return nil
+			}
 			return fmt.Errorf("rediscache/idempotent: SET NX: %w", err)
-		}
-		if !ok {
-			// 已有标记，跳过
-			return nil
 		}
 
 		// 首次调用 inner；失败则删除标记允许重试

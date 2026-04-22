@@ -797,13 +797,6 @@ func mustNotErr(t *testing.T, err error, msg string) {
 	}
 }
 
-func mustErr(t *testing.T, err error, msg string) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: expected error, got nil", msg)
-	}
-}
-
 func mustEqual[T comparable](t *testing.T, got, want T, msg string) {
 	t.Helper()
 	if got != want {
@@ -818,10 +811,3 @@ func mustLen[T any](t *testing.T, got []T, want int, msg string) {
 	}
 }
 
-// assert 仅断言计数上限，超出即失败
-func mustLTE(t *testing.T, got, max int, msg string) {
-	t.Helper()
-	if got > max {
-		t.Fatalf("%s: got %d, want <= %d", msg, got, max)
-	}
-}

@@ -83,7 +83,9 @@ func TestLocker_ReleaseOnlyOwnLock(t *testing.T) {
 	}
 
 	// 手工覆盖 key 为别人的 token（模拟 A 的锁 TTL 过期后被 B 获取）
-	server.Set("orderflow:lock:k", "different-token")
+	if err := server.Set("orderflow:lock:k", "different-token"); err != nil {
+		t.Fatalf("miniredis set: %v", err)
+	}
 
 	// A 调自己的 unlock——Lua CAS 应发现 token 不匹配，不 DEL
 	unlockA()

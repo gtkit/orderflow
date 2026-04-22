@@ -126,13 +126,16 @@ func TestDefaultGenerateOrderToken_Unpredictable(t *testing.T) {
 	// 旧实现是 SHA-256 哈希，攻击者拿到 (orderNo, userID, productID) 可离线重算——这是漏洞。
 	const N = 100
 	tokens := make(map[string]struct{}, N)
+	isHex := func(r rune) bool {
+		return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
+	}
 	for range N {
 		tok := defaultGenerateOrderToken("ORD1", 1001, 2001)
 		if len(tok) != 32 {
 			t.Fatalf("expected 32 hex chars, got %d: %q", len(tok), tok)
 		}
 		for _, r := range tok {
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			if !isHex(r) {
 				t.Fatalf("non-hex char in token: %q", tok)
 			}
 		}
