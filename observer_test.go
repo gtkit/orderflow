@@ -267,3 +267,66 @@ func TestCloseByUser_NotFound(t *testing.T) {
 		t.Fatalf("expected ErrOrderNotFound, got %v", err)
 	}
 }
+
+// =============================================================================
+// safeObserver：第三方 Observer 实现 panic 时不应冲破 Engine 主流程
+// =============================================================================
+
+type panickingObserver struct {
+	panicOnEvent    bool
+	panicOnDuration bool
+	eventCalls      int
+	durationCalls   int
+}
+
+func (p *panickingObserver) Event(context.Context, EventKind, string, map[string]any) {
+	p.eventCalls++
+	if p.panicOnEvent {
+		panic("observer event panic")
+	}
+}
+
+func (p *panickingObserver) Duration(context.Context, string, time.Duration, error) {
+	p.durationCalls++
+	if p.panicOnDuration {
+		panic("observer duration panic")
+	}
+}
+
+func TestSafeObserver_RecoversFromEventPanic(t *testing.T) {
+	inner := &panickingObserver{panicOnEvent: true}
+	wrapped := wrapObserver(inner, nopLogger())
+
+	// 不应 panic 出来
+	wrapped.Event(context.Background(), EventOrderPaid, "O1", map[string]any{"k": 1})
+	if inner.eventCalls != 1 {
+		t.Fatalf("inner Event calls = %d, want 1", inner.eventCalls)
+	}
+}
+
+func TestSafeObserver_RecoversFromDurationPanic(t *testing.T) {
+	inner := &panickingObserver{panicOnDuration: true}
+	wrapped := wrapObserver(inner, nopLogger())
+
+	wrapped.Duration(context.Background(), OpCreate, time.Millisecond, nil)
+	if inner.durationCalls != 1 {
+		t.Fatalf("inner Duration calls = %d, want 1", inner.durationCalls)
+	}
+}
+
+func TestSafeObserver_NopIsNotWrapped(t *testing.T) {
+	// nopObserver 走零开销路径，不应被 safeObserver 包装
+	got := wrapObserver(nopObserver{}, nopLogger())
+	if _, ok := got.(nopObserver); !ok {
+		t.Fatalf("wrapObserver(nop) should return nopObserver, got %T", got)
+	}
+}
+
+func TestSafeObserver_DoubleWrapIsIdempotent(t *testing.T) {
+	inner := &panickingObserver{}
+	first := wrapObserver(inner, nopLogger())
+	second := wrapObserver(first, nopLogger())
+	if first != second {
+		t.Fatalf("double wrap should return the same safeObserver")
+	}
+}

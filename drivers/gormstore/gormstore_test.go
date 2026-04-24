@@ -691,6 +691,14 @@ func TestStore_UpdateByOrderNo(t *testing.T) {
 	if err := s.UpdateByOrderNo(ctx, "N", nil); err != nil {
 		t.Errorf("empty updates: %v", err)
 	}
+
+	// 目标订单不存在应返回 ErrOrderNotFound，避免无声失败
+	err = s.UpdateByOrderNo(ctx, "NOT_EXIST", map[string]any{
+		"product_title": "ghost",
+	})
+	if !errors.Is(err, orderflow.ErrOrderNotFound) {
+		t.Fatalf("want ErrOrderNotFound for missing order, got %v", err)
+	}
 }
 
 func TestStore_AppendLogAndList(t *testing.T) {

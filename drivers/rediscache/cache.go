@@ -20,6 +20,8 @@ const (
 	defaultTerminalTTL    = 2 * time.Minute
 )
 
+var errNilRedisClient = errors.New("rediscache: redis client is nil")
+
 // StatusCache 是基于 Redis 的 orderflow.StatusCache 实现。
 type StatusCache struct {
 	rdb          *redis.Client
@@ -54,7 +56,7 @@ func WithTTL(status orderflow.OrderStatus, d time.Duration) CacheOption {
 	return func(c *StatusCache) { c.ttls[status] = d }
 }
 
-// NewStatusCache 构造 StatusCache。rdb 必填；为 nil 时后续方法会发生 nil 解引用 panic。
+// NewStatusCache 构造 StatusCache。rdb 必填；为 nil 时公开方法会返回明确错误。
 func NewStatusCache(rdb *redis.Client, opts ...CacheOption) *StatusCache {
 	c := &StatusCache{
 		rdb:          rdb,
@@ -71,9 +73,23 @@ func NewStatusCache(rdb *redis.Client, opts ...CacheOption) *StatusCache {
 
 var _ orderflow.StatusCache = (*StatusCache)(nil)
 
+// Validate reports whether the cache has all required internal dependencies.
+func (c *StatusCache) Validate() error {
+	if c == nil {
+		return errors.New("rediscache: status cache is nil")
+	}
+	if c.rdb == nil {
+		return errNilRedisClient
+	}
+	return nil
+}
+
 // Set 写入状态缓存。
 // expireAt 只在 status == StatusPending 时使用，其它状态传零值即可。
 func (c *StatusCache) Set(ctx context.Context, orderToken string, userID int64, status orderflow.OrderStatus, expireAt time.Time) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
 	if err := c.rdb.Set(ctx, c.key(orderToken), encodeCacheValue(status, userID), c.ttlFor(status, expireAt)).Err(); err != nil {
 		return fmt.Errorf("rediscache: set: %w", err)
 	}
@@ -86,6 +102,9 @@ func (c *StatusCache) Set(ctx context.Context, orderToken string, userID int64, 
 //   - {}, false, nil      → miss（含脏数据）
 //   - {}, false, err      → Redis 错误
 func (c *StatusCache) Get(ctx context.Context, orderToken string) (orderflow.CachedStatus, bool, error) {
+	if err := c.Validate(); err != nil {
+		return orderflow.CachedStatus{}, false, err
+	}
 	raw, err := c.rdb.Get(ctx, c.key(orderToken)).Result()
 	if errors.Is(err, redis.Nil) {
 		return orderflow.CachedStatus{}, false, nil
@@ -103,6 +122,9 @@ func (c *StatusCache) Get(ctx context.Context, orderToken string) (orderflow.Cac
 
 // Delete 删除状态缓存。
 func (c *StatusCache) Delete(ctx context.Context, orderToken string) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
 	if err := c.rdb.Del(ctx, c.key(orderToken)).Err(); err != nil {
 		return fmt.Errorf("rediscache: delete: %w", err)
 	}

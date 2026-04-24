@@ -22,6 +22,9 @@ type Store[O OrderSnapshot] interface {
 	// ----- 写路径 -----
 
 	Create(ctx context.Context, spec OrderSpec) (O, error)
+	// UpdateByOrderNo 按订单号更新指定字段。
+	// orderNo 对应订单不存在时必须返回 ErrOrderNotFound（errors.Is 可检测），
+	// 避免无声失败掩盖业务 bug。
 	UpdateByOrderNo(ctx context.Context, orderNo string, updates map[string]any) error
 
 	// ----- 状态跃迁（CAS，幂等） -----

@@ -2,6 +2,7 @@ package orderflow
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -23,7 +24,18 @@ type Locker interface {
 	TryLock(ctx context.Context, key string, ttl time.Duration) (unlock func(), ok bool, err error)
 }
 
+var (
+	errNilOnPaidHook   = errors.New("orderflow: on paid hook is nil")
+	errNilMarkerExists = errors.New("orderflow: marker exists func is nil")
+)
+
 // IdempotentOnPaid 包装 OnPaid 钩子，用外部 marker 实现"至多调用一次成功"的幂等。
+//
+// **⚠ 高级 API，慎用**：本 helper 把 marker 选择权完全交给业务方，
+// **marker 选错会导致重复发放权益**（详见下方"marker 可以是"中关于 bill 表的说明）。
+// 除非你明确理解 Engine 的"OnPaid → FinalizePaidOrder" 时序窗口，否则**强烈建议优先
+// 使用 `drivers/rediscache.IdempotentOnPaidViaRedis`**——它用独立 Redis 标记，
+// 与 Engine 时序解耦，是安全的默认选项。
 //
 // 工作原理：调 inner 前先查 markerExists(orderNo)；已存在则跳过（视为业务已处理）；
 // 不存在则调 inner。由业务方负责在 inner 成功路径里写入 marker。
@@ -48,6 +60,12 @@ func IdempotentOnPaid[O OrderSnapshot](
 	markerExists func(ctx context.Context, orderNo string) (bool, error),
 ) OnPaidHook[O] {
 	return func(ctx context.Context, o O, n NotifyResult) error {
+		if inner == nil {
+			return errNilOnPaidHook
+		}
+		if markerExists == nil {
+			return errNilMarkerExists
+		}
 		exists, err := markerExists(ctx, o.OrderNo())
 		if err != nil {
 			return err

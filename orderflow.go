@@ -9,6 +9,25 @@ import (
 	"time"
 )
 
+// CloseSupersededPolicy 决定 Engine.Create 替代旧 Pending 单时，网关 CloseOrder 失败的处理策略。
+//
+// 场景：用户改了优惠券 / 支付方式，触发 closeSuperseded 关闭旧单，期间调用网关 CloseOrder。
+// 网关返回 5xx 或网络超时（已带 3 次重试 + 渠道特定的可忽略错误识别）后仍失败时：
+//
+//   - SupersededStrict（默认）→ 直接返回错误，Create 失败。用户需重试整个下单流程。
+//   - SupersededDegraded → 记 ALERT 日志，仍尝试本地 CAS Close 旧单，让 Create 继续。
+//     旧网关订单的清理由 CloseFallback 周期扫描兜底（依赖 IsIgnorableCloseError 收敛）。
+type CloseSupersededPolicy int8
+
+const (
+	// SupersededStrict 硬失败：网关关闭失败时直接返回错误，Create 失败。
+	// 零值，向后兼容 v1.0.0 行为。适合"必须保证旧单已在网关侧关闭"的强一致性场景。
+	SupersededStrict CloseSupersededPolicy = 0
+	// SupersededDegraded 降级：网关关闭失败时记 ALERT 日志 + 走本地 CAS Close 让 Create 继续。
+	// 推荐的生产配置——网关偶发抖动不应阻塞用户下新单。
+	SupersededDegraded CloseSupersededPolicy = 1
+)
+
 // Config 是 Engine 的全部配置项。
 //
 //   - 能力接口（Store / Gateway / DelayQueue / Cache / Stream）必填，缺失会返回 ErrMissingDep；
@@ -62,6 +81,11 @@ type Config[O OrderSnapshot] struct {
 	// CreateLockTTL Locker 持锁时长上限。短于 Create 实际耗时（含 UnifiedOrder 网络 RTT）
 	// 会导致锁提前释放。零值使用 DefaultCreateLockTTL（10s）。
 	CreateLockTTL time.Duration
+
+	// CloseSupersededPolicy 控制 Create 替代旧 Pending 单时，网关 CloseOrder 失败的策略。
+	// 零值 SupersededStrict 保持 v1.0.0 行为；推荐生产环境改为 SupersededDegraded。
+	// 详见 CloseSupersededPolicy 类型说明。
+	CloseSupersededPolicy CloseSupersededPolicy
 }
 
 // Engine 是订单流程的核心编排器。
@@ -92,12 +116,17 @@ type Engine[O OrderSnapshot] struct {
 	generateOrderToken GenerateOrderTokenFunc
 
 	// 参数
-	orderExpire   time.Duration
-	location      *time.Location
-	logger        *slog.Logger
-	observer      Observer
-	locker        Locker // nil 表示未配置，Create 不加锁
-	createLockTTL time.Duration
+	orderExpire           time.Duration
+	location              *time.Location
+	logger                *slog.Logger
+	observer              Observer
+	locker                Locker // nil 表示未配置，Create 不加锁
+	createLockTTL         time.Duration
+	closeSupersededPolicy CloseSupersededPolicy
+}
+
+type dependencyValidator interface {
+	Validate() error
 }
 
 // New 构造 Engine。能力接口为 nil 时返回 ErrMissingDep；参数非法时返回 ErrInvalidConfig。
@@ -122,31 +151,33 @@ func New[O OrderSnapshot](cfg Config[O]) (*Engine[O], error) {
 	if observer == nil {
 		observer = nopObserver{}
 	}
+	observer = wrapObserver(observer, logger)
 
 	return &Engine[O]{
-		store:              cfg.Store,
-		gateway:            cfg.Gateway,
-		delayQueue:         cfg.DelayQueue,
-		cache:              cfg.Cache,
-		stream:             cfg.Stream,
-		onCreated:          cfg.OnCreated,
-		onPaid:             cfg.OnPaid,
-		onDelivered:        cfg.OnDelivered,
-		onClosed:           cfg.OnClosed,
-		onReopened:         cfg.OnReopened,
-		onSuperseded:       cfg.OnSuperseded,
-		onAnomaly:          cfg.OnAnomaly,
-		isReusable:         cfg.IsReusable,
-		resolveChannel:     cfg.ResolveChannel,
-		buildNotifyURL:     cfg.BuildNotifyURL,
-		generateOrderNo:    genOrderNo,
-		generateOrderToken: genOrderToken,
-		orderExpire:        cmp.Or(cfg.OrderExpire, DefaultOrderExpire),
-		location:           resolveLocation(cfg.Timezone),
-		logger:             logger,
-		observer:           observer,
-		locker:             cfg.Locker, // 可为 nil
-		createLockTTL:      cmp.Or(cfg.CreateLockTTL, DefaultCreateLockTTL),
+		store:                 cfg.Store,
+		gateway:               cfg.Gateway,
+		delayQueue:            cfg.DelayQueue,
+		cache:                 cfg.Cache,
+		stream:                cfg.Stream,
+		onCreated:             cfg.OnCreated,
+		onPaid:                cfg.OnPaid,
+		onDelivered:           cfg.OnDelivered,
+		onClosed:              cfg.OnClosed,
+		onReopened:            cfg.OnReopened,
+		onSuperseded:          cfg.OnSuperseded,
+		onAnomaly:             cfg.OnAnomaly,
+		isReusable:            cfg.IsReusable,
+		resolveChannel:        cfg.ResolveChannel,
+		buildNotifyURL:        cfg.BuildNotifyURL,
+		generateOrderNo:       genOrderNo,
+		generateOrderToken:    genOrderToken,
+		orderExpire:           cmp.Or(cfg.OrderExpire, DefaultOrderExpire),
+		location:              resolveLocation(cfg.Timezone),
+		logger:                logger,
+		observer:              observer,
+		locker:                cfg.Locker, // 可为 nil
+		createLockTTL:         cmp.Or(cfg.CreateLockTTL, DefaultCreateLockTTL),
+		closeSupersededPolicy: cfg.CloseSupersededPolicy,
 	}, nil
 }
 
@@ -172,24 +203,44 @@ func (e *Engine[O]) Location() *time.Location {
 
 // validate 校验 Config 的必填项与合法性。
 func (c Config[O]) validate() error {
+	deps := []struct {
+		name  string
+		value any
+	}{
+		{"Store", c.Store},
+		{"Gateway", c.Gateway},
+		{"DelayQueue", c.DelayQueue},
+		{"Cache", c.Cache},
+		{"Stream", c.Stream},
+	}
+
 	var missing []string
-	if c.Store == nil {
-		missing = append(missing, "Store")
-	}
-	if c.Gateway == nil {
-		missing = append(missing, "Gateway")
-	}
-	if c.DelayQueue == nil {
-		missing = append(missing, "DelayQueue")
-	}
-	if c.Cache == nil {
-		missing = append(missing, "Cache")
-	}
-	if c.Stream == nil {
-		missing = append(missing, "Stream")
+	for _, dep := range deps {
+		if dep.value == nil {
+			missing = append(missing, dep.name)
+		}
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("%w: %s", ErrMissingDep, strings.Join(missing, ", "))
+	}
+
+	for _, dep := range deps {
+		validator, ok := dep.value.(dependencyValidator)
+		if !ok {
+			continue
+		}
+		if err := validator.Validate(); err != nil {
+			return fmt.Errorf("%w: %s: %w", ErrInvalidConfig, dep.name, err)
+		}
+	}
+
+	if c.Locker != nil {
+		validator, ok := c.Locker.(dependencyValidator)
+		if ok {
+			if err := validator.Validate(); err != nil {
+				return fmt.Errorf("%w: Locker: %w", ErrInvalidConfig, err)
+			}
+		}
 	}
 
 	if c.OrderExpire < 0 {

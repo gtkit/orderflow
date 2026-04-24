@@ -21,7 +21,7 @@
 //	OnPaid           | error         | 阻断 finalize 流程，订单停在 Paid，由 fallback worker 重试（必须幂等）
 //	OnDelivered      | error         | WARN 日志，不阻断，订单已 Delivered
 //	OnClosed         | (none)        | 旁路观察，无错误返回
-//	OnReopened       | (none)        | 旁路观察；注意此时 finalize 尚未开始，可能后续仍失败
+//	OnReopened       | (none)        | ⚠ 触发后 Engine 立刻调 OnPaid——禁止在此发权益（详见 OnReopenedHook GoDoc）
 //	OnSuperseded     | (none)        | 旁路观察
 //	OnAnomaly        | (none)        | 旁路观察，用于告警/审计
 //
@@ -41,12 +41,33 @@
 // 步骤 3 失败 → 订单停在 Paid，AnomalyDeliveryFailed，fallback worker 周期重试。
 // 步骤 4 失败 → 同上；权益可能已被 3 发放过一次，所以 OnPaid 必须幂等。
 //
+// # 替换旧 Pending 单的策略
+//
+// 用户改了优惠券 / 支付方式触发 Engine.Create 替换旧 Pending 单时，
+// Engine 会先调用网关 CloseOrder 关旧单。网关失败的处理由 Config.CloseSupersededPolicy 控制：
+//
+//   - SupersededStrict（零值，向后兼容 v1.0.0）：网关失败 → Create 失败，用户被阻塞下单。
+//     适合"必须保证旧单已在网关侧关闭"的强一致性场景。
+//   - SupersededDegraded（推荐生产配置）：网关失败 → 记 ALERT 日志 + 走本地 CAS Close +
+//     Create 继续。旧网关订单的清理由 CloseFallback 周期扫描 + IsIgnorableCloseError 收敛。
+//
+// 选 Degraded 的代价：极短窗口内"本地已 Closed 但网关还认为 Pending"——
+// 若用户在此窗口完成支付，HandleNotify 会走 handleClosedPaidNotify 自动恢复路径
+// （见 engine_notify.go），最终一致。
+//
 // # 生产部署清单
 //
 //   - Redis 集群部署：rediszq driver 的 key 必须用 hash tag（见 drivers/rediszq/doc.go）。
+//   - 推荐配置：注入 Locker（避免并发 Create 多 Pending）+ Observer（监控指标）+
+//     IdempotentOnPaidViaRedis（OnPaid 幂等保护）+ CloseSupersededPolicy=SupersededDegraded
+//     （网关抖动不阻塞用户下新单）。
+//   - DB 部分唯一索引：MySQL 8.0+ 推荐 ALTER TABLE orders ADD UNIQUE INDEX
+//     uk_pending_user_product ((CASE WHEN status=1 THEN CONCAT(user_id,'-',product_id) ELSE NULL END))，
+//     作为"一用户一商品一 Pending"的最终兜底。
 //   - worker goroutine：业务钩子 panic 会被 recover 吞掉，但必须检查日志关键字
 //     "orderflow: panic in ... recovered" 做告警。
-//   - "orderflow: ALERT ..." 开头的 ERROR 日志都值得配告警（异常订单、缓存不一致等）。
+//   - "orderflow: ALERT ..." 开头的 ERROR 日志都值得配告警（异常订单、缓存不一致、
+//     SupersededDegraded 路径下的网关失败等）。
 //   - drivers 的 go.mod replace 指令仅用于本地开发，发版前必须删除并 require 真实 tag
 //     （仓库提供 scripts/check-release.sh 做 CI 校验）。
 //

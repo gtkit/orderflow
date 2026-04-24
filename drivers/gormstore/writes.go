@@ -19,15 +19,21 @@ func (s *Store[O, M]) Create(ctx context.Context, spec orderflow.OrderSpec) (O, 
 }
 
 // UpdateByOrderNo 按订单号更新字段。
+//
+// orderNo 对应订单不存在时返回 orderflow.ErrOrderNotFound（GORM 的 Updates
+// 在 where 无匹配时不会报错，这里显式检查 RowsAffected 把无声失败变成可观测错误）。
 func (s *Store[O, M]) UpdateByOrderNo(ctx context.Context, orderNo string, updates map[string]any) error {
 	if len(updates) == 0 {
 		return nil
 	}
-	err := s.db.WithContext(ctx).Table(s.orderTable).
+	result := s.db.WithContext(ctx).Table(s.orderTable).
 		Where(s.cols.OrderNo+" = ?", orderNo).
-		Updates(updates).Error
-	if err != nil {
-		return fmt.Errorf("gormstore: update by order_no: %w", err)
+		Updates(updates)
+	if result.Error != nil {
+		return fmt.Errorf("gormstore: update by order_no: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("gormstore: update by order_no %q: %w", orderNo, orderflow.ErrOrderNotFound)
 	}
 	return nil
 }

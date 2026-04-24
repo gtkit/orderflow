@@ -3,6 +3,7 @@ package paymgrgw
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/gtkit/go-pay/paymgr"
@@ -38,8 +39,22 @@ func New(mgr *paymgr.Manager, opts ...Option) *Gateway {
 
 var _ orderflow.PaymentGateway = (*Gateway)(nil)
 
+// Validate reports whether the gateway has all required internal dependencies.
+func (g *Gateway) Validate() error {
+	if g == nil {
+		return fmt.Errorf("paymgrgw: gateway is nil")
+	}
+	if g.mgr == nil {
+		return fmt.Errorf("paymgrgw: manager is nil")
+	}
+	return nil
+}
+
 // UnifiedOrder 下单并返回客户端拉起支付所需参数。
 func (g *Gateway) UnifiedOrder(ctx context.Context, ch orderflow.Channel, req orderflow.UnifiedOrderRequest) (orderflow.UnifiedOrderResponse, error) {
+	if err := g.Validate(); err != nil {
+		return orderflow.UnifiedOrderResponse{}, err
+	}
 	resp, err := g.mgr.UnifiedOrder(ctx, paymgr.Channel(ch), &paymgr.UnifiedOrderRequest{
 		OutTradeNo:  req.OutTradeNo,
 		TotalAmount: req.TotalAmount,
@@ -60,11 +75,17 @@ func (g *Gateway) UnifiedOrder(ctx context.Context, ch orderflow.Channel, req or
 
 // CloseOrder 关闭网关侧订单。
 func (g *Gateway) CloseOrder(ctx context.Context, ch orderflow.Channel, orderNo string) error {
+	if err := g.Validate(); err != nil {
+		return err
+	}
 	return g.mgr.CloseOrder(ctx, paymgr.Channel(ch), &paymgr.CloseOrderRequest{OutTradeNo: orderNo})
 }
 
 // QueryOrder 向网关查询订单真实状态，用于对账与恢复。
 func (g *Gateway) QueryOrder(ctx context.Context, ch orderflow.Channel, orderNo string) (orderflow.QueryResult, error) {
+	if err := g.Validate(); err != nil {
+		return orderflow.QueryResult{}, err
+	}
 	resp, err := g.mgr.QueryOrder(ctx, paymgr.Channel(ch), &paymgr.QueryOrderRequest{OutTradeNo: orderNo})
 	if err != nil {
 		return orderflow.QueryResult{}, err
@@ -81,6 +102,9 @@ func (g *Gateway) QueryOrder(ctx context.Context, ch orderflow.Channel, orderNo 
 
 // ParseNotify 解析并验签支付回调。
 func (g *Gateway) ParseNotify(ctx context.Context, ch orderflow.Channel, r *http.Request) (orderflow.NotifyResult, error) {
+	if err := g.Validate(); err != nil {
+		return orderflow.NotifyResult{}, err
+	}
 	n, err := g.mgr.ParseNotify(ctx, paymgr.Channel(ch), r)
 	if err != nil {
 		return orderflow.NotifyResult{}, err
@@ -98,6 +122,9 @@ func (g *Gateway) ParseNotify(ctx context.Context, ch orderflow.Channel, r *http
 
 // AckNotify 向网关回写成功响应。
 func (g *Gateway) AckNotify(ch orderflow.Channel, w http.ResponseWriter) error {
+	if err := g.Validate(); err != nil {
+		return err
+	}
 	return g.mgr.ACKNotify(paymgr.Channel(ch), w)
 }
 

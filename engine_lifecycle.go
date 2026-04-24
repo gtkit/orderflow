@@ -68,6 +68,11 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 		}
 		defer unlock()
 		if !ok {
+			e.observer.Event(ctx, EventAnomaly, "", map[string]any{
+				"kind":       "concurrent_create_rejected",
+				"user_id":    req.UserID,
+				"product_id": req.Product.ID,
+			})
 			err = ErrConcurrentCreate
 			return nil, err
 		}
@@ -185,15 +190,28 @@ func (e *Engine[O]) rollbackPendingOnEnqueueFail(ctx context.Context, order O, e
 // closeSuperseded 在用户发起新订单时关闭旧 Pending 单。
 //
 // 返回值语义：
-//   - err != nil：网关关闭失败或存储错误，调用方应中断；
+//   - err != nil：网关关闭失败（仅 SupersededStrict 模式）或存储错误，调用方应中断；
 //   - hasCurrent == true：CAS 抢跑失败（典型：支付回调先一步把订单 Paid），调用方应把 current 作为结果返回给客户端；
 //   - hasCurrent == false：旧单已成功关闭，调用方可以继续创建新单。
+//
+// 网关失败处理：受 Config.CloseSupersededPolicy 控制。
+//   - SupersededStrict（默认）：直接返回错误，Create 失败。
+//   - SupersededDegraded：记 ALERT 日志，继续走本地 CAS Close + Create；
+//     网关侧的旧订单清理由 CloseFallback 周期扫描兜底。
 func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductID uint64) (current O, hasCurrent bool, err error) {
 	var zero O
-	if err := e.afterClose(ctx, existing); err != nil {
+	if afterErr := e.afterClose(ctx, existing); afterErr != nil {
 		e.appendLog(ctx, existing, StatusPending, StatusPending, "system",
-			"gateway close failed during replacement: "+err.Error())
-		return zero, false, err
+			"gateway close failed during replacement: "+afterErr.Error())
+		if e.closeSupersededPolicy != SupersededDegraded {
+			return zero, false, afterErr
+		}
+		// 降级：记 ALERT 让运维感知；继续走本地 CAS Close。
+		// 网关侧的"旧单未关"由 CloseFallback 后续扫描重试兜底。
+		e.logger.ErrorContext(ctx, "orderflow: ALERT close superseded gateway failed, degraded to local close",
+			slog.String("order_no", existing.OrderNo()),
+			slog.Any("error", afterErr),
+		)
 	}
 
 	affected, casErr := e.store.CASClose(ctx, existing.OrderNo())

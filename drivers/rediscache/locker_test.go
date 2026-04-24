@@ -179,6 +179,22 @@ func TestLocker_SerializesConcurrent(t *testing.T) {
 	}
 }
 
+func TestLocker_NilClientReturnsError(t *testing.T) {
+	l := NewLocker(nil)
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("unexpected panic: %v", r)
+			}
+		}()
+		_, _, err = l.TryLock(context.Background(), "k", time.Minute)
+	}()
+	if err == nil {
+		t.Fatal("expected explicit error for nil redis client")
+	}
+}
+
 // =============================================================================
 // IdempotentOnPaidViaRedis 测试
 // =============================================================================
@@ -312,5 +328,40 @@ func TestIdempotentOnPaidViaRedis_ConcurrentSingleInnerCall(t *testing.T) {
 
 	if innerCalls != 1 {
 		t.Fatalf("innerCalls = %d, want exactly 1 under %d concurrent calls", innerCalls, N)
+	}
+}
+
+func TestIdempotentOnPaidViaRedis_NilRedisClientReturnsError(t *testing.T) {
+	inner := func(_ context.Context, _ *idempOrder, _ orderflow.NotifyResult) error { return nil }
+	wrapped := IdempotentOnPaidViaRedis[*idempOrder](inner, nil, "", time.Hour)
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("unexpected panic: %v", r)
+			}
+		}()
+		err = wrapped(context.Background(), &idempOrder{orderNo: "ORD-NIL"}, orderflow.NotifyResult{})
+	}()
+	if err == nil {
+		t.Fatal("expected explicit error for nil redis client")
+	}
+}
+
+func TestIdempotentOnPaidViaRedis_NilInnerReturnsError(t *testing.T) {
+	wrapped := IdempotentOnPaidViaRedis[*idempOrder](nil, redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()}), "", time.Hour)
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("unexpected panic: %v", r)
+			}
+		}()
+		err = wrapped(context.Background(), &idempOrder{orderNo: "ORD-NIL-INNER"}, orderflow.NotifyResult{})
+	}()
+	if err == nil {
+		t.Fatal("expected explicit error for nil inner hook")
 	}
 }

@@ -310,11 +310,12 @@ engine, err := orderflow.New[*myorder.Order](orderflow.Config[*myorder.Order]{
     },
 
     // ----- 参数（全部可选，有合理默认） -----
-    OrderExpire:   30 * time.Minute,         // Pending 订单有效期
-    CreateLockTTL: 10 * time.Second,
-    Timezone:      "Asia/Shanghai",
-    Logger:        slog.Default(),
-    Locker:        locker,                    // 不传则不加锁
+    OrderExpire:           30 * time.Minute,         // Pending 订单有效期
+    CreateLockTTL:         10 * time.Second,
+    Timezone:              "Asia/Shanghai",
+    Logger:                slog.Default(),
+    Locker:                locker,                    // 不传则不加锁
+    CloseSupersededPolicy: orderflow.SupersededDegraded, // 推荐：网关 CloseOrder 失败时不阻塞用户下新单（默认 Strict 保持 v1.0.0 行为）
     // Observer: otelObserver,                // Prometheus / OTEL 适配器
 })
 if err != nil {

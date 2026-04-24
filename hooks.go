@@ -53,6 +53,21 @@ type OnDeliveredHook[O OrderSnapshot] func(ctx context.Context, order O) error
 type OnClosedHook[O OrderSnapshot] func(ctx context.Context, order O, reason ClosedReason)
 
 // OnReopenedHook 已关闭的订单被支付网关确认成功、经 CASReopenPaid 恢复后触发。
+//
+// **⚠ 重要：此钩子触发后 Engine 会立刻调用 OnPaid + OnDelivered**
+// （见 engine_notify.go 的 handleClosedPaidNotify 时序）。业务方**不要在此钩子内做任何
+// "发权益"类副作用**——否则同一订单会先在 OnReopened 发一次、再在 OnPaid 发一次，
+// 造成**双倍发放**。
+//
+// 推荐分工：
+//
+//   - OnReopened：仅做"事件通知 / 审计 / 告警"——发企业微信、写审计日志、增 Prometheus
+//     counter。Closed→Paid 在生产中是**异常恢复路径**，运维需要感知。
+//   - OnPaid：所有"发权益"类副作用的**唯一入口**（VIP / 实物发货 / 积分入账），
+//     并且必须幂等（见 OnPaidHook 的幂等强约束）。
+//
+// 若业务确实需要在恢复路径做特殊处理（如给"补偿支付"用户单独发优惠券），
+// 也应封装为与 OnPaid 副作用解耦的独立操作，并自行做幂等去重。
 type OnReopenedHook[O OrderSnapshot] func(ctx context.Context, order O, notify NotifyResult)
 
 // OnSupersededHook 旧 Pending 订单被同用户的新订单替代关闭时触发。

@@ -278,3 +278,89 @@ func stringOfLen(n int) string {
 	}
 	return string(buf)
 }
+
+// seedSupersedeOldOrder 注入一个同用户、同商品但支付方式不同的旧 Pending 单，
+// 用来触发 Engine.Create 的 closeSuperseded 分支。
+func seedSupersedeOldOrder(t *testing.T, env *testEnv, req CreateRequest) *testOrder {
+	t.Helper()
+	old := &testOrder{
+		orderNo:       "OLD-SUP",
+		orderToken:    "TOKEN-OLD-SUP",
+		userID:        req.UserID,
+		status:        StatusPending,
+		productID:     req.Product.ID,
+		productType:   req.Product.Type,
+		productTitle:  req.Product.Title,
+		originalPrice: req.Product.Price,
+		payAmount:     req.Product.Price,
+		payMethod:     "wechat", // 与 standardRequest 默认不同
+		expireAt:      time.Now().Add(time.Hour),
+	}
+	env.store.seed(old)
+	env.dq.enqueued[old.orderNo] = old.expireAt
+	return old
+}
+
+// TestCreate_SupersedeStrict_GatewayCloseFailureBlocks 验证默认 SupersededStrict 行为：
+// 网关 CloseOrder 失败 → closeSuperseded 直接 return error → Create 失败 → 用户被阻塞下单。
+// 这是 v1.0.0 默认行为，需要保持向后兼容。
+func TestCreate_SupersedeStrict_GatewayCloseFailureBlocks(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	// 默认 policy 是 SupersededStrict（零值），不显式设置
+	req := standardRequest()
+	req.PayMethod = "alipay" // 触发 superseded（旧单是 wechat）
+	old := seedSupersedeOldOrder(t, env, req)
+
+	// 网关 CloseOrder 注入持久错误
+	env.gw.CloseOrderErr = errors.New("gateway 5xx")
+
+	_, err := env.engine.Create(ctx, req)
+	if err == nil {
+		t.Fatal("expected error in SupersededStrict mode when gateway fails")
+	}
+	if !errContains(err, "close superseded") {
+		t.Errorf("err = %v, want wrap of 'close superseded'", err)
+	}
+
+	// 旧单状态不变（未被 CAS Close），新单未创建
+	mustEqual(t, old.status, StatusPending, "old order status unchanged")
+	mustEqual(t, env.store.CreateCalls, 0, "no new order created")
+	mustEqual(t, env.gw.UnifiedOrderCalls, 0, "no UnifiedOrder for new")
+}
+
+// TestCreate_SupersedeDegraded_GatewayCloseFailureContinues 验证 SupersededDegraded：
+// 网关 CloseOrder 失败 → 记 ALERT 日志 + 继续走本地 CAS Close + Create 新单成功。
+// 推荐生产配置：网关偶发抖动不应阻塞用户下新单。
+func TestCreate_SupersedeDegraded_GatewayCloseFailureContinues(t *testing.T) {
+	env := newTestEnv(t)
+	env.engine.closeSupersededPolicy = SupersededDegraded
+	ctx := context.Background()
+
+	req := standardRequest()
+	req.PayMethod = "alipay"
+	old := seedSupersedeOldOrder(t, env, req)
+
+	env.gw.CloseOrderErr = errors.New("gateway 5xx")
+
+	result, err := env.engine.Create(ctx, req)
+	mustNotErr(t, err, "Create should succeed in Degraded mode despite gateway failure")
+	if result.Order == nil {
+		t.Fatal("expected new order")
+	}
+	if result.Order.OrderNo() == old.orderNo {
+		t.Fatal("expected new order, got old")
+	}
+
+	// 旧单已通过本地 CAS Close 推到 Closed 状态
+	mustEqual(t, old.status, StatusClosed, "old order CAS-closed locally")
+	// 新单已创建成功
+	mustEqual(t, env.store.CreateCalls, 1, "new order created")
+	mustEqual(t, env.gw.UnifiedOrderCalls, 1, "new UnifiedOrder called")
+
+	// OnSuperseded + OnClosed 仍然会触发（CAS Close 走本地路径成功）
+	mustLen(t, env.OnSupersededCalls, 1, "OnSuperseded fired")
+	mustLen(t, env.OnClosedCalls, 1, "OnClosed fired")
+	mustEqual(t, env.OnClosedCalls[0].Reason, ClosedReasonSuperseded, "OnClosed reason")
+}

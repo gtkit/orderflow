@@ -251,3 +251,37 @@ func TestDecodeCacheValue_RejectsMalformed(t *testing.T) {
 		}
 	}
 }
+
+func TestCache_NilClientReturnsError(t *testing.T) {
+	c := NewStatusCache(nil)
+	ctx := context.Background()
+
+	check := func(name string, fn func() error) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("unexpected panic: %v", r)
+					}
+				}()
+				err = fn()
+			}()
+			if err == nil {
+				t.Fatal("expected explicit error for nil redis client")
+			}
+		})
+	}
+
+	check("Set", func() error {
+		return c.Set(ctx, "TOK", 1001, orderflow.StatusPaid, time.Time{})
+	})
+	check("Get", func() error {
+		_, _, err := c.Get(ctx, "TOK")
+		return err
+	})
+	check("Delete", func() error {
+		return c.Delete(ctx, "TOK")
+	})
+}

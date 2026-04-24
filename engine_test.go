@@ -2,6 +2,7 @@ package orderflow
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,6 +59,88 @@ func TestNew_RejectsNegativeOrderExpire(t *testing.T) {
 	_, err := New[*testOrder](cfg)
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+}
+
+type validatedGateway struct {
+	*fakeGateway
+	err error
+}
+
+func (g *validatedGateway) Validate() error {
+	return g.err
+}
+
+func TestNew_RejectsDependencyValidateError(t *testing.T) {
+	cfg := Config[*testOrder]{
+		Store:      newFakeStore(),
+		Gateway:    &validatedGateway{fakeGateway: newFakeGateway(), err: errors.New("manager is nil")},
+		DelayQueue: newFakeDelayQueue(),
+		Cache:      newFakeCache(),
+		Stream:     newFakeStream(),
+	}
+
+	_, err := New[*testOrder](cfg)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+	if err == nil || err.Error() == ErrInvalidConfig.Error() {
+		t.Fatalf("expected dependency details in error, got %v", err)
+	}
+}
+
+type validatingStore struct {
+	*fakeStore
+	err error
+}
+
+func (s *validatingStore) Validate() error {
+	return s.err
+}
+
+func TestNew_ReportsDependencyNameFromValidateError(t *testing.T) {
+	cfg := Config[*testOrder]{
+		Store:      &validatingStore{fakeStore: newFakeStore(), err: errors.New("db handle is nil")},
+		Gateway:    newFakeGateway(),
+		DelayQueue: newFakeDelayQueue(),
+		Cache:      newFakeCache(),
+		Stream:     newFakeStream(),
+	}
+
+	_, err := New[*testOrder](cfg)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Store") {
+		t.Fatalf("expected Store name in error, got %v", err)
+	}
+}
+
+type validatingLocker struct {
+	*fakeLocker
+	err error
+}
+
+func (l *validatingLocker) Validate() error {
+	return l.err
+}
+
+func TestNew_RejectsLockerValidateError(t *testing.T) {
+	cfg := Config[*testOrder]{
+		Store:      newFakeStore(),
+		Gateway:    newFakeGateway(),
+		DelayQueue: newFakeDelayQueue(),
+		Cache:      newFakeCache(),
+		Stream:     newFakeStream(),
+		Locker:     &validatingLocker{fakeLocker: newFakeLocker(), err: errors.New("redis locker client is nil")},
+	}
+
+	_, err := New[*testOrder](cfg)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Locker") {
+		t.Fatalf("expected Locker name in error, got %v", err)
 	}
 }
 

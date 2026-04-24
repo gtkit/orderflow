@@ -14,6 +14,9 @@ const DefaultCreateLockTTL = 10 * time.Second
 type CreateRequest struct {
 	UserID    int64
 	PayMethod string
+	// ChannelID 是业务自定义的渠道维度（如商户子渠道、推广来源等）。
+	// Engine 不解读其含义，仅透传到 OrderSpec.ChannelID 交由 Store driver 持久化。
+	// 零值表示不指定；业务需要时自行约定编码。
 	ChannelID int64
 	ClientIP  string
 	Product   ProductInfo

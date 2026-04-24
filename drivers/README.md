@@ -18,9 +18,9 @@ orderflow/
 └── drivers/
     ├── paymgrgw/              # module github.com/gtkit/orderflow/drivers/paymgrgw
     │   └── go.mod
-    ├── gormstore/             # (规划中) module github.com/gtkit/orderflow/drivers/gormstore
-    ├── rediscache/            # (规划中) module github.com/gtkit/orderflow/drivers/rediscache
-    └── rediszq/               # (规划中) module github.com/gtkit/orderflow/drivers/rediszq
+    ├── gormstore/             # module github.com/gtkit/orderflow/drivers/gormstore
+    ├── rediscache/            # module github.com/gtkit/orderflow/drivers/rediscache
+    └── rediszq/               # module github.com/gtkit/orderflow/drivers/rediszq
 ```
 
 ## driver 清单
@@ -34,7 +34,11 @@ orderflow/
 
 ## 本地开发
 
-sleep_client 的 `go.work` 同时 `use` 了核心包和 driver 子模块。各 driver 的 `go.mod` 通过 `replace github.com/gtkit/orderflow => ../..` 保证脱离 workspace 也能独立构建。正式 tag 时需同步把 `require` 里的核心包版本号升到对应版本。
+当前仓库的 `go.work` 只把四个 driver 纳入 `use` 列表，并通过 workspace-level `replace github.com/gtkit/orderflow => .` 让 driver 在本地解析到当前核心包代码。
+
+- 改核心包：在仓库根目录用 `GOWORK=off` 跑校验，例如 `GOWORK=off go test ./...`
+- 改 driver：进入对应 driver 目录执行 `go test ./...`
+- 正式发版时，driver `go.mod` 不允许保留本地 `replace`，以 `scripts/check-release.sh` 为准
 
 ## 发版与依赖维护
 

@@ -2,6 +2,7 @@ package orderflow
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -74,3 +75,51 @@ type nopObserver struct{}
 
 func (nopObserver) Event(context.Context, EventKind, string, map[string]any) {}
 func (nopObserver) Duration(context.Context, string, time.Duration, error)   {}
+
+// safeObserver 为注入的 Observer 实现加 panic recover 防御。
+//
+// 设计背景：Observer 约定 "禁止 panic"（见 Observer 接口注释），但约定靠自觉，
+// 业务侧接 Prometheus / OpenTelemetry 时一旦某个 adapter 出 bug，panic 会冲破 Engine
+// 主流程——订单可能已 CAS 到 Paid 但整个 HandleNotify 异常退出。safeObserver 把这种
+// 第三方实现错误隔离到 Observer 自身，Engine 内部始终视 Observer 为 "绝不失败"。
+//
+// 对 nopObserver 不包装（零开销路径保持原样）。
+type safeObserver struct {
+	inner  Observer
+	logger *slog.Logger
+}
+
+func wrapObserver(inner Observer, logger *slog.Logger) Observer {
+	if _, ok := inner.(nopObserver); ok {
+		return inner
+	}
+	if _, ok := inner.(*safeObserver); ok {
+		return inner
+	}
+	return &safeObserver{inner: inner, logger: logger}
+}
+
+func (s *safeObserver) Event(ctx context.Context, kind EventKind, orderNo string, attrs map[string]any) {
+	defer func() {
+		if r := recover(); r != nil && s.logger != nil {
+			s.logger.ErrorContext(ctx, "orderflow: observer.Event panic recovered",
+				slog.String("event_kind", string(kind)),
+				slog.String("order_no", orderNo),
+				slog.Any("panic", r),
+			)
+		}
+	}()
+	s.inner.Event(ctx, kind, orderNo, attrs)
+}
+
+func (s *safeObserver) Duration(ctx context.Context, op string, d time.Duration, err error) {
+	defer func() {
+		if r := recover(); r != nil && s.logger != nil {
+			s.logger.ErrorContext(ctx, "orderflow: observer.Duration panic recovered",
+				slog.String("op", op),
+				slog.Any("panic", r),
+			)
+		}
+	}()
+	s.inner.Duration(ctx, op, d, err)
+}

@@ -54,6 +54,19 @@ func NewLocker(rdb *redis.Client, opts ...LockerOption) *Locker {
 
 var _ orderflow.Locker = (*Locker)(nil)
 
+var errNilOnPaidHook = errors.New("rediscache: on paid hook is nil")
+
+// Validate reports whether the locker has all required internal dependencies.
+func (l *Locker) Validate() error {
+	if l == nil {
+		return errors.New("rediscache: locker is nil")
+	}
+	if l.rdb == nil {
+		return errNilRedisClient
+	}
+	return nil
+}
+
 // TryLock 非阻塞尝试获取锁。
 //
 // 实现：SET key token NX EX ttl。成功 → 持锁（返回 ok=true + 专属 unlock）。
@@ -61,6 +74,9 @@ var _ orderflow.Locker = (*Locker)(nil)
 //
 // unlock 调用 Lua 脚本 CAS 删除：只在 GET(key) == token 时 DEL，避免误删其他客户端的锁。
 func (l *Locker) TryLock(ctx context.Context, key string, ttl time.Duration) (func(), bool, error) {
+	if err := l.Validate(); err != nil {
+		return func() {}, false, err
+	}
 	token, err := generateToken()
 	if err != nil {
 		return func() {}, false, fmt.Errorf("rediscache/locker: generate token: %w", err)
@@ -125,9 +141,19 @@ func IdempotentOnPaidViaRedis[O orderflow.OrderSnapshot](
 		keyPrefix = "orderflow:onpaid:"
 	}
 	return func(ctx context.Context, o O, n orderflow.NotifyResult) error {
+		if inner == nil {
+			return errNilOnPaidHook
+		}
+		if rdb == nil {
+			return errNilRedisClient
+		}
 		key := keyPrefix + o.OrderNo()
 		// 尝试占位：SET NX EX。NX 失败（已存在）返回 redis.Nil，视为"已被处理过"。
-		_, err := rdb.SetArgs(ctx, key, "1", redis.SetArgs{
+		// marker value 携带 "<unix_ts>|<trade_no>"，方便排障：
+		//   redis-cli get orderflow:onpaid:N20260424001 -> "1745467200|TXN-12345"
+		// 历史值是 "1"，仍能正常读取（NX 模式下我们只关心是否已存在）。
+		markerValue := fmt.Sprintf("%d|%s", time.Now().Unix(), n.TransactionID)
+		_, err := rdb.SetArgs(ctx, key, markerValue, redis.SetArgs{
 			Mode: "NX",
 			TTL:  ttl,
 		}).Result()

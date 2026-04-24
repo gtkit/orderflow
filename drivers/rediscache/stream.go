@@ -3,6 +3,7 @@ package rediscache
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ const defaultStreamKeyPrefix = "orderflow:status:events:"
 type StatusStream struct {
 	rdb       *redis.Client
 	keyPrefix string
+	logger    *slog.Logger
 }
 
 // StreamOption 是 NewStatusStream 的可选配置。
@@ -27,11 +29,21 @@ func WithStreamKeyPrefix(prefix string) StreamOption {
 	return func(s *StatusStream) { s.keyPrefix = prefix }
 }
 
+// WithStreamLogger 覆盖状态订阅内部使用的 logger。
+func WithStreamLogger(logger *slog.Logger) StreamOption {
+	return func(s *StatusStream) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
+}
+
 // NewStatusStream 构造 StatusStream。rdb 必填。
 func NewStatusStream(rdb *redis.Client, opts ...StreamOption) *StatusStream {
 	s := &StatusStream{
 		rdb:       rdb,
 		keyPrefix: defaultStreamKeyPrefix,
+		logger:    slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -41,8 +53,22 @@ func NewStatusStream(rdb *redis.Client, opts ...StreamOption) *StatusStream {
 
 var _ orderflow.StatusStream = (*StatusStream)(nil)
 
+// Validate reports whether the stream has all required internal dependencies.
+func (s *StatusStream) Validate() error {
+	if s == nil {
+		return fmt.Errorf("rediscache: status stream is nil")
+	}
+	if s.rdb == nil {
+		return errNilRedisClient
+	}
+	return nil
+}
+
 // Publish 将订单状态变更广播到 Redis Pub/Sub 频道。
 func (s *StatusStream) Publish(ctx context.Context, orderToken string, status orderflow.OrderStatus) error {
+	if err := s.Validate(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(orderToken) == "" {
 		return fmt.Errorf("rediscache: publish: empty order token")
 	}
@@ -61,6 +87,9 @@ func (s *StatusStream) Publish(ctx context.Context, orderToken string, status or
 //   - 业务上建议让 ctx 与订阅的生命周期解耦（比如用 context.Background 而不是 request-scoped
 //     的 ctx），显式调用 Close 来结束订阅。request-scoped ctx 配合 Close 也能工作，但耦合紧。
 func (s *StatusStream) Subscribe(ctx context.Context, orderToken string) (orderflow.Subscription, error) {
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(orderToken) == "" {
 		return nil, fmt.Errorf("rediscache: subscribe: empty order token")
 	}
@@ -75,6 +104,7 @@ func (s *StatusStream) Subscribe(ctx context.Context, orderToken string) (orderf
 		pubsub: ps,
 		events: make(chan orderflow.OrderStatus, 8),
 		done:   make(chan struct{}),
+		logger: s.logger,
 	}
 	go sub.forward(ctx)
 	return sub, nil
@@ -98,6 +128,7 @@ type subscription struct {
 	events chan orderflow.OrderStatus
 	done   chan struct{}
 	once   sync.Once
+	logger *slog.Logger
 }
 
 func (s *subscription) Events() <-chan orderflow.OrderStatus {
@@ -123,7 +154,11 @@ func (s *subscription) Close() error {
 func (s *subscription) forward(ctx context.Context) {
 	defer close(s.events)
 	defer func() {
-		_ = recover()
+		if r := recover(); r != nil && s.logger != nil {
+			s.logger.ErrorContext(ctx, "rediscache: status subscription forward panic recovered",
+				slog.Any("panic", r),
+			)
+		}
 	}()
 
 	msgCh := s.pubsub.Channel()

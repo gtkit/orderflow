@@ -314,16 +314,32 @@ func (e *Engine[O]) normalizeNotifyPaidAt(notify *NotifyResult) {
 	notify.PaidAt = notify.PaidAt.In(e.location)
 }
 
-// reloadOrder 尝试重新从 Store 读最新快照；失败则返回原 order，调用方继续使用。
+// reloadOrder 尝试重新从 Store 读最新快照；失败则返回原 order 并发出 ALERT。
+//
+// 调用方（HandleNotify）在 CAS 成功后会调用 reloadOrder 取含 trade_no / paid_at 的新快照。
+// 即使失败 finalize 仍能继续跑（bill.TradeNo 与 PaidAt 取自 notify，不依赖 order 快照），
+// 但 OnPaid 钩子拿到的 order.Status() 可能仍是 CAS 前的旧值——所以这里把日志级别从
+// Warn 提到 Error 并附 ALERT 关键字，同时发 EventAnomaly 让监控能感知。
 func (e *Engine[O]) reloadOrder(ctx context.Context, order O) O {
 	refreshed, found, err := e.store.GetByNo(ctx, order.OrderNo())
-	if err != nil || !found {
-		if err != nil {
-			e.logger.WarnContext(ctx, "orderflow: reload order failed, use stale copy",
-				slog.String("order_no", order.OrderNo()),
-				slog.Any("error", err),
-			)
-		}
+	if err != nil {
+		e.logger.ErrorContext(ctx, "orderflow: ALERT: reload order failed, proceeding with stale snapshot",
+			slog.String("order_no", order.OrderNo()),
+			slog.Any("error", err),
+		)
+		e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
+			"kind":   "reload_failed",
+			"reason": err.Error(),
+		})
+		return order
+	}
+	if !found {
+		e.logger.ErrorContext(ctx, "orderflow: ALERT: order disappeared during reload",
+			slog.String("order_no", order.OrderNo()),
+		)
+		e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
+			"kind": "reload_disappeared",
+		})
 		return order
 	}
 	return refreshed

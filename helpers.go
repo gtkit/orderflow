@@ -21,6 +21,12 @@ func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID
 			slog.String("status", status.String()),
 			slog.Any("error", err),
 		)
+		e.observer.Event(ctx, EventAnomaly, "", map[string]any{
+			"kind":        "publish_status_cache_set_failed",
+			"order_token": orderToken,
+			"status":      status.String(),
+			"reason":      err.Error(),
+		})
 		if delErr := e.cache.Delete(ctx, orderToken); delErr != nil {
 			e.logger.ErrorContext(ctx, "orderflow: ALERT cache inconsistent: set and delete both failed",
 				slog.String("order_token", orderToken),
@@ -28,6 +34,13 @@ func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID
 				slog.Any("set_error", err),
 				slog.Any("delete_error", delErr),
 			)
+			e.observer.Event(ctx, EventAnomaly, "", map[string]any{
+				"kind":         "publish_status_cache_inconsistent",
+				"order_token":  orderToken,
+				"status":       status.String(),
+				"set_error":    err.Error(),
+				"delete_error": delErr.Error(),
+			})
 		}
 		return
 	}
@@ -37,6 +50,12 @@ func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID
 			slog.String("status", status.String()),
 			slog.Any("error", err),
 		)
+		e.observer.Event(ctx, EventAnomaly, "", map[string]any{
+			"kind":        "publish_status_stream_failed",
+			"order_token": orderToken,
+			"status":      status.String(),
+			"reason":      err.Error(),
+		})
 	}
 }
 

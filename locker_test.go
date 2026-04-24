@@ -78,6 +78,10 @@ func TestCreate_WithLocker_ConcurrentConflictReturnsErrConcurrentCreate(t *testi
 	lock.DenyAll = true // 模拟别的 goroutine 已持锁
 	env.engine.locker = lock
 
+	// 注入 recordingObserver 校验并发拒绝会发出 EventAnomaly
+	rec := newRecordingObserver()
+	env.engine.observer = rec
+
 	_, err := env.engine.Create(context.Background(), standardRequest())
 	if !errors.Is(err, ErrConcurrentCreate) {
 		t.Fatalf("expected ErrConcurrentCreate, got %v", err)
@@ -85,6 +89,15 @@ func TestCreate_WithLocker_ConcurrentConflictReturnsErrConcurrentCreate(t *testi
 
 	// 没有订单被创建
 	mustEqual(t, env.store.CreateCalls, 0, "no Store.Create")
+
+	// EventAnomaly 发出，kind=concurrent_create_rejected
+	anomalies := rec.byKind(EventAnomaly)
+	if len(anomalies) != 1 {
+		t.Fatalf("want 1 anomaly event, got %d", len(anomalies))
+	}
+	if got := anomalies[0].Attrs["kind"]; got != "concurrent_create_rejected" {
+		t.Errorf("anomaly kind = %v, want concurrent_create_rejected", got)
+	}
 }
 
 func TestCreate_WithLocker_LockerErrorPropagates(t *testing.T) {
@@ -247,6 +260,46 @@ func TestIdempotentOnPaid_InnerErrorPropagates(t *testing.T) {
 	err := wrapped(context.Background(), &testOrder{orderNo: "N4"}, NotifyResult{})
 	if !errors.Is(err, innerErr) {
 		t.Fatalf("err = %v, want wraps %v", err, innerErr)
+	}
+}
+
+func TestIdempotentOnPaid_NilInnerReturnsError(t *testing.T) {
+	markerExists := func(_ context.Context, _ string) (bool, error) {
+		return false, nil
+	}
+	wrapped := IdempotentOnPaid[*testOrder](nil, markerExists)
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("unexpected panic: %v", r)
+			}
+		}()
+		err = wrapped(context.Background(), &testOrder{orderNo: "N5"}, NotifyResult{})
+	}()
+	if err == nil {
+		t.Fatal("expected explicit error for nil inner hook")
+	}
+}
+
+func TestIdempotentOnPaid_NilMarkerExistsReturnsError(t *testing.T) {
+	inner := func(_ context.Context, _ *testOrder, _ NotifyResult) error {
+		return nil
+	}
+	wrapped := IdempotentOnPaid[*testOrder](inner, nil)
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("unexpected panic: %v", r)
+			}
+		}()
+		err = wrapped(context.Background(), &testOrder{orderNo: "N6"}, NotifyResult{})
+	}()
+	if err == nil {
+		t.Fatal("expected explicit error for nil markerExists")
 	}
 }
 

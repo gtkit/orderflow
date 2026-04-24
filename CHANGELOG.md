@@ -4,7 +4,31 @@
 
 ## [Unreleased]
 
-_尚无未发布变更。_
+### Added
+- `drivers/rediscache`: 新增 `WithStreamLogger`，订阅转发 goroutine 在 recover panic 时输出结构化错误日志
+- 新增 `Config.CloseSupersededPolicy` 选项及 `SupersededStrict` / `SupersededDegraded` 常量。配置为 `SupersededDegraded` 后，Create 替代旧 Pending 单时网关 CloseOrder 失败不再阻塞用户下新单——改记 ALERT 日志 + 走本地 CAS Close + 由 CloseFallback 后续兜底重试。零值保持 v1.0.0 行为（向后兼容）
+- 核心 Engine 内部对注入的 `Observer` 实现做 panic recover 包装：业务侧 Prometheus / OpenTelemetry adapter 若 panic 不再冲破 `Create` / `HandleNotify` 主流程，而是记录 ERROR 日志并继续；`nopObserver` 走零开销路径不被包装
+- `Engine.Create` 在因 `Locker` 拒锁而返回 `ErrConcurrentCreate` 时发出 `EventAnomaly`（kind=`concurrent_create_rejected`），便于 Prometheus 侧监控并发下单被拒的频率
+- `publishStatus` 在 cache.Set / Delete / stream.Publish 失败时发出 `EventAnomaly`（kind=`publish_status_cache_set_failed` / `publish_status_cache_inconsistent` / `publish_status_stream_failed`），便于监控缓存与订阅通道的健康度
+- `reloadOrder` 在 `GetByNo` 失败或订单消失时发出 `EventAnomaly`（kind=`reload_failed` / `reload_disappeared`），替代之前静默使用旧快照
+
+### Changed
+- `drivers/rediscache.IdempotentOnPaidViaRedis` 的幂等 marker value 从固定 `"1"` 改为 `"<unix_ts>|<trade_no>"`，便于排障时直接 `redis-cli get` 看到处理时刻与对应交易号；NX 语义不变，对读取方向后兼容
+- `HandleNotify` 内 `reloadOrder` 失败的日志级别从 `Warn` 提升到 `Error` 并带 `ALERT` 关键字，默认监控告警会主动感知
+
+### Fixed
+- 核心 `Engine.New` 现在会在启动期调用可选依赖校验，默认 driver 的无效内部依赖不再延迟到真实请求时才暴露
+- `Config.Locker` 在配置了支持 `Validate()` 的实现时也会参与启动期校验，避免锁依赖问题延迟到首个 `Create`
+- 核心 `IdempotentOnPaid` helper 在 `inner` 或 `markerExists` 为空时改为返回明确错误，不再触发 nil panic
+- `drivers/paymgrgw` 与 `drivers/rediscache` 在 nil 内部依赖场景下改为返回明确错误，不再触发运行期 panic
+- `drivers/gormstore.UpdateByOrderNo`：订单不存在时返回 `ErrOrderNotFound`（GORM `Updates` 的无声失败会让下游误认为写入成功，这里显式检查 `RowsAffected==0` 改为可诊断错误）
+- 发布与仓库说明文档统一为当前 workspace 布局：根模块校验命令使用 `GOWORK=off`,并移除过期的 driver `replace` / “规划中” 描述
+
+### Documentation
+- `OnReopenedHook` GoDoc 强制约束：明确"Closed→Paid 恢复路径会立刻触发 OnPaid"，业务方禁止在 OnReopened 内做"发权益"类副作用，防止双倍发放
+- `IdempotentOnPaid` GoDoc 加入"⚠ 高级 API，慎用"警告，强烈推荐改用 `drivers/rediscache.IdempotentOnPaidViaRedis`，避免业务方因 marker 选错触发 OnPaid → FinalizePaidOrder 时序窗口下的重复发放
+- `CreateRequest.ChannelID` / `OrderSpec.ChannelID` 补 GoDoc：明确语义为业务自定义渠道维度，Engine 仅透传不解读
+- `BillSpec.ChannelID` 补说明：`OrderSnapshot` 接口未暴露 `ChannelID()`，Engine 当前不填充此字段；driver 如需持久化 channel_id 需在 `FinalizePaidOrder` 内自行查询补写
 
 ## [1.0.0] - 2026-04-21
 

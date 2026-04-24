@@ -6,7 +6,7 @@
 // 设计：
 //   - drivers/* 进入 use 列表，成为 workspace 成员；
 //   - 根 orderflow 不进入 use 列表，只通过 replace 指令供 drivers 引用——
-//     这样 `go test` 直接在根目录跑核心包时走正常 module 模式（和发布消费者一致），
+//     因此根目录校验核心包时必须显式使用 `GOWORK=off`（和发布消费者一致），
 //     只有 drivers 需要本地 orderflow 时才走 workspace 解析；
 //   - driver go.mod 保持 **无 replace 指令**，scripts/check-release.sh 继续生效。
 //

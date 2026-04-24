@@ -1,8 +1,10 @@
 package paymgrgw
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gtkit/go-pay/paymgr"
@@ -77,5 +79,75 @@ func TestWithTradeType(t *testing.T) {
 	g := New(paymgr.NewManager(), WithTradeType(paymgr.TradeTypeJSAPI))
 	if g.tradeType != paymgr.TradeTypeJSAPI {
 		t.Errorf("tradeType = %v, want Jsapi", g.tradeType)
+	}
+}
+
+func TestGateway_ValidateRejectsNilManager(t *testing.T) {
+	g := New(nil)
+	if err := g.Validate(); err == nil {
+		t.Fatal("expected Validate to reject nil manager")
+	}
+}
+
+func TestGateway_MethodsReturnErrorWhenManagerNil(t *testing.T) {
+	g := New(nil)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		fn   func() error
+	}{
+		{
+			name: "UnifiedOrder",
+			fn: func() error {
+				_, err := g.UnifiedOrder(ctx, "wechat", orderflow.UnifiedOrderRequest{
+					OutTradeNo: "OUT-1", TotalAmount: 1, Subject: "x", NotifyURL: "https://example.com/notify",
+				})
+				return err
+			},
+		},
+		{
+			name: "CloseOrder",
+			fn: func() error {
+				return g.CloseOrder(ctx, "wechat", "OUT-1")
+			},
+		},
+		{
+			name: "QueryOrder",
+			fn: func() error {
+				_, err := g.QueryOrder(ctx, "wechat", "OUT-1")
+				return err
+			},
+		},
+		{
+			name: "ParseNotify",
+			fn: func() error {
+				_, err := g.ParseNotify(ctx, "wechat", httptest.NewRequest("POST", "/notify", nil))
+				return err
+			},
+		},
+		{
+			name: "AckNotify",
+			fn: func() error {
+				return g.AckNotify("wechat", httptest.NewRecorder())
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("unexpected panic: %v", r)
+					}
+				}()
+				err = tc.fn()
+			}()
+			if err == nil {
+				t.Fatal("expected explicit error for nil manager")
+			}
+		})
 	}
 }

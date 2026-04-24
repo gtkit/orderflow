@@ -1,7 +1,9 @@
 package rediscache
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -204,5 +206,61 @@ func TestStream_IgnoresMalformedPayload(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for valid event (malformed should not block)")
+	}
+}
+
+func TestStream_NilClientReturnsError(t *testing.T) {
+	s := NewStatusStream(nil)
+
+	t.Run("Publish", func(t *testing.T) {
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("unexpected panic: %v", r)
+				}
+			}()
+			err = s.Publish(context.Background(), "TOK", orderflow.StatusPaid)
+		}()
+		if err == nil {
+			t.Fatal("expected error for nil redis client")
+		}
+	})
+
+	t.Run("Subscribe", func(t *testing.T) {
+		var (
+			sub orderflow.Subscription
+			err error
+		)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("unexpected panic: %v", r)
+				}
+			}()
+			sub, err = s.Subscribe(context.Background(), "TOK")
+		}()
+		if sub != nil {
+			t.Fatalf("expected nil subscription, got %#v", sub)
+		}
+		if err == nil {
+			t.Fatal("expected error for nil redis client")
+		}
+	})
+}
+
+func TestStream_ForwardLogsRecoveredPanic(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	sub := &subscription{
+		logger: logger,
+		done:   make(chan struct{}),
+		events: make(chan orderflow.OrderStatus, 1),
+	}
+
+	sub.forward(context.Background())
+
+	if got := buf.String(); got == "" {
+		t.Fatal("expected recovered panic to be logged")
 	}
 }
