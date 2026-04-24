@@ -5,6 +5,20 @@
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [1.1.0] - 2026-04-24
+
+### Added
 - `drivers/rediscache`: 新增 `WithStreamLogger`，订阅转发 goroutine 在 recover panic 时输出结构化错误日志
 - 新增 `Config.CloseSupersededPolicy` 选项及 `SupersededStrict` / `SupersededDegraded` 常量。配置为 `SupersededDegraded` 后，Create 替代旧 Pending 单时网关 CloseOrder 失败不再阻塞用户下新单——改记 ALERT 日志 + 走本地 CAS Close + 由 CloseFallback 后续兜底重试。零值保持 v1.0.0 行为（向后兼容）
 - 核心 Engine 内部对注入的 `Observer` 实现做 panic recover 包装：业务侧 Prometheus / OpenTelemetry adapter 若 panic 不再冲破 `Create` / `HandleNotify` 主流程，而是记录 ERROR 日志并继续；`nopObserver` 走零开销路径不被包装
