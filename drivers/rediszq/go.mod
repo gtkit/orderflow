@@ -1,6 +1,6 @@
 module github.com/gtkit/orderflow/drivers/rediszq
 
-go 1.26
+go 1.26.2
 
 require (
 	github.com/alicebob/miniredis/v2 v2.37.0
@@ -14,4 +14,3 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 )
-
