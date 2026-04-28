@@ -70,11 +70,19 @@ func (p *fakeProvider) Refund(_ context.Context, _ *paymgr.RefundRequest) (*paym
 	return nil, errors.New("fakeProvider.Refund not used by paymgrgw tests")
 }
 
+func (p *fakeProvider) QueryRefund(_ context.Context, _ *paymgr.QueryRefundRequest) (*paymgr.QueryRefundResponse, error) {
+	return nil, errors.New("fakeProvider.QueryRefund not used by paymgrgw tests")
+}
+
 func (p *fakeProvider) ParseNotify(_ context.Context, _ *http.Request) (*paymgr.NotifyResult, error) {
 	if p.notifyErr != nil {
 		return nil, p.notifyErr
 	}
 	return p.notifyResp, nil
+}
+
+func (p *fakeProvider) ParseRefundNotify(_ context.Context, _ *http.Request) (*paymgr.RefundNotifyResult, error) {
+	return nil, errors.New("fakeProvider.ParseRefundNotify not used by paymgrgw tests")
 }
 
 func (p *fakeProvider) ACKNotify(w http.ResponseWriter) {
