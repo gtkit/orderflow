@@ -67,4 +67,14 @@ if [[ $failed -eq 0 ]]; then
     echo "OK: all drivers are release-ready (no local replace, no v0.0.0, GOWORK=off compiles)"
 fi
 
+# ---- Step 4: 模块发版审计 ----
+# 即使 driver 编译通过，也要看代码 / 依赖是否有更新但未发版的情况。
+# 这是发版前最容易遗漏的一步——单跑 check-modules.sh 也行。
+echo
+echo "---- module release audit ----"
+if ! bash "$(dirname "$0")/check-modules.sh" --quiet; then
+    echo "ERROR: at least one module needs release (run scripts/check-modules.sh for details)"
+    failed=1
+fi
+
 exit $failed
