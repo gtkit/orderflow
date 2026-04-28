@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: vet + test (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - root
+          - drivers/gormstore
+          - drivers/rediscache
+          - drivers/rediszq
+          - drivers/paymgrgw
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Resolve module path
+        id: path
+        run: |
+          if [ "${{ matrix.module }}" = "root" ]; then
+            echo "dir=." >> $GITHUB_OUTPUT
+            echo "gowork_off=1" >> $GITHUB_OUTPUT
+          else
+            echo "dir=${{ matrix.module }}" >> $GITHUB_OUTPUT
+            echo "gowork_off=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: go vet
+        working-directory: ${{ steps.path.outputs.dir }}
+        run: |
+          if [ "${{ steps.path.outputs.gowork_off }}" = "1" ]; then
+            GOWORK=off go vet ./...
+          else
+            go vet ./...
+          fi
+
+      - name: go test (race)
+        working-directory: ${{ steps.path.outputs.dir }}
+        run: |
+          if [ "${{ steps.path.outputs.gowork_off }}" = "1" ]; then
+            GOWORK=off go test -race -count=1 -timeout=5m ./...
+          else
+            go test -race -count=1 -timeout=5m ./...
+          fi
+
+  release-check:
+    name: drivers release-readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scripts/check-release.sh
+        run: bash scripts/check-release.sh
