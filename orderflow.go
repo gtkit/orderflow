@@ -246,17 +246,11 @@ func (c Config[O]) validate() error {
 	if c.OrderExpire < 0 {
 		return fmt.Errorf("%w: OrderExpire must be non-negative, got %s", ErrInvalidConfig, c.OrderExpire)
 	}
-	// 上下界保护：避免业务方误填导致整批订单立即过期 / 缓存 TTL 与订单生命周期严重错配。
-	// 阈值选择：
-	//   - 1s 下界：低于此值意味着订单还没下单就过期，肯定是误填。
-	//   - 24h 上界：超过此值时 cache.defaultTerminalTTL（2min）等默认值会显著失配，
-	//     业务方应显式注入定制 StatusCache 才能正确支撑长生命周期订单——为了让误填可见，
-	//     这里返回 ErrInvalidConfig，业务方可在 Config 层显式覆盖检查（见下方 RFC）。
+	// 下界保护：低于 1s 几乎肯定是误填（订单还没下单就过期）。
+	// **不设上界**：业务可能存在合法的长生命周期订单（押金、长租、预订等），由业务方
+	// 自行确认 StatusCache 的 TTL 与之匹配。文档（CLAUDE.md / README）说明该约束。
 	if c.OrderExpire > 0 && c.OrderExpire < time.Second {
 		return fmt.Errorf("%w: OrderExpire %s is below the safe lower bound (1s)", ErrInvalidConfig, c.OrderExpire)
-	}
-	if c.OrderExpire > 24*time.Hour {
-		return fmt.Errorf("%w: OrderExpire %s exceeds the safe upper bound (24h); inject a custom StatusCache and confirm cache TTLs", ErrInvalidConfig, c.OrderExpire)
 	}
 	if c.CreateLockTTL < 0 {
 		return fmt.Errorf("%w: CreateLockTTL must be non-negative, got %s", ErrInvalidConfig, c.CreateLockTTL)

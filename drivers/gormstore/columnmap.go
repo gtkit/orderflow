@@ -26,9 +26,14 @@ type ColumnMap struct {
 	DeliveredAt string
 	ExpireAt    string
 	UpdatedAt   string
-	// ChannelID 业务自定义渠道维度。FinalizePaidOrder 会用此列回查并补写到 bill 表，
-	// 让"按渠道对账"在不改 OrderSnapshot 接口的前提下可用。零值默认 "channel_id"，
-	// 业务表无此列时设置一个不存在的列名会触发 SQL 错误——业务方按需关掉补写功能（待支持）。
+	// ChannelID 是 opt-in 的业务渠道维度列名。
+	//
+	// 与其他列不同，**ChannelID 没有默认值**——必须由业务方显式设置（如 "channel_id"）
+	// 才会启用 FinalizePaidOrder 的回查补写。空字符串语义为"未配置"，FinalizePaidOrder
+	// 会跳过 SELECT，bill 表的 channel_id 列保留 BillSpec 传入的零值。
+	//
+	// 这层 opt-in 是为了向后兼容：v1.1.0 及之前的接入方订单表可能没有 channel_id 列，
+	// 默认开启会让 SELECT 失败导致整个 finalize 事务回滚（订单卡在 Paid 无法履约）。
 	ChannelID string
 }
 
@@ -97,8 +102,7 @@ func (c ColumnMap) withDefaults() ColumnMap {
 	if c.UpdatedAt == "" {
 		c.UpdatedAt = "updated_at"
 	}
-	if c.ChannelID == "" {
-		c.ChannelID = "channel_id"
-	}
+	// 注意：ChannelID 故意不设默认值——空字符串表示"业务未启用渠道回查"。
+	// 设默认 "channel_id" 会让没有该列的业务表 finalize 失败（破坏性变更）。
 	return c
 }

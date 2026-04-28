@@ -51,11 +51,15 @@ func (s *Store[O, M]) FinalizePaidOrder(ctx context.Context, order O, bill order
 		}
 
 		billModel := buildBill(bill)
-		// 补写 channel_id：BillSpec.ChannelID 由调用方（Engine.finalizeDelivery）填零值，
-		// 因为 OrderSnapshot 接口未暴露 ChannelID()。这里在同一事务内回查订单表的
-		// channel_id 列补到 bill，让"按渠道对账"开箱可用。
-		// 仅当 BillSpec 未携带 ChannelID 时才回查（业务方通过自定义路径已经填值则保留）。
-		if billModel.ChannelID == 0 {
+		// 可选：在同一事务内回查 channel_id 列补到 bill 表，让"按渠道对账"开箱可用。
+		//
+		// 触发条件（**必须三者皆满足**）：
+		//   1. ColumnMap.ChannelID 已显式配置（非空）——opt-in，确保业务表确实有该列；
+		//   2. BillSpec.ChannelID 为零（业务方未通过自定义路径填值）；
+		//   3. 订单存在该列且可读取。
+		//
+		// 不满足时跳过 SELECT，billModel.ChannelID 保留 BillSpec 传入值（通常为 0）。
+		if s.cols.ChannelID != "" && billModel.ChannelID == 0 {
 			var channelID int64
 			if err := tx.Table(s.orderTable).
 				Select(s.cols.ChannelID).
