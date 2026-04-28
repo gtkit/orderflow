@@ -286,14 +286,40 @@ onAnomaly := func(ctx context.Context, o *myorder.Order, kind orderflow.AnomalyK
 
 ```go
 import (
-    "log/slog"
+    "context"
     "time"
 
     "github.com/gtkit/logger"
     "github.com/gtkit/orderflow"
+    "go.uber.org/zap"
 )
 
-slog.SetDefault(slog.New(logger.SlogHandler()))
+// 业务方在 main() 里初始化 gtkit/logger（日志路径、文件分割、等级等参数按业务调）
+_ = logger.New(logger.WithConsole(true))
+
+// 把 gtkit/logger 包装成 orderflow.Logger 接口（4 方法 + ctx + Field 列表）
+type gtkitLogger struct{}
+
+func (gtkitLogger) Debug(ctx context.Context, msg string, fs ...orderflow.Field) {
+    logger.DebugCtx(ctx, msg, toZapFields(fs)...)
+}
+func (gtkitLogger) Info(ctx context.Context, msg string, fs ...orderflow.Field) {
+    logger.InfoCtx(ctx, msg, toZapFields(fs)...)
+}
+func (gtkitLogger) Warn(ctx context.Context, msg string, fs ...orderflow.Field) {
+    logger.WarnCtx(ctx, msg, toZapFields(fs)...)
+}
+func (gtkitLogger) Error(ctx context.Context, msg string, fs ...orderflow.Field) {
+    logger.ErrorCtx(ctx, msg, toZapFields(fs)...)
+}
+
+func toZapFields(fs []orderflow.Field) []zap.Field {
+    out := make([]zap.Field, len(fs))
+    for i, f := range fs {
+        out[i] = zap.Any(f.Key, f.Value)
+    }
+    return out
+}
 
 engine, err := orderflow.New[*myorder.Order](orderflow.Config[*myorder.Order]{
     // ----- 能力接口（必填） -----
@@ -327,7 +353,7 @@ engine, err := orderflow.New[*myorder.Order](orderflow.Config[*myorder.Order]{
     OrderExpire:           30 * time.Minute,         // Pending 订单有效期
     CreateLockTTL:         10 * time.Second,
     Timezone:              "Asia/Shanghai",
-    Logger:                slog.Default(),
+    Logger:                gtkitLogger{},             // 上面包装的 orderflow.Logger 实现；不传则使用内置 nopLogger（丢弃所有日志）
     Locker:                locker,                    // 不传则不加锁
     CloseSupersededPolicy: orderflow.SupersededDegraded, // 推荐：网关 CloseOrder 失败时不阻塞用户下新单（默认 Strict 保持 v1.0.0 行为）
     // Observer: otelObserver,                // Prometheus / OTEL 适配器
@@ -421,14 +447,14 @@ func notifyHandler(engine *orderflow.Engine[*myorder.Order], gateway orderflow.P
         if err := engine.HandleNotify(r.Context(), ch, r); err != nil {
             // HandleNotify 只在"解析 / CAS 系统错误"时返回 err
             // 业务异常（金额不一致、状态机例外）已走 OnAnomaly，这里 err == nil
-            engine.Logger().ErrorContext(r.Context(), "handle notify fatal",
-                slog.Any("error", err))
+            engine.Logger().Error(r.Context(), "handle notify fatal",
+                orderflow.Err(err))
             http.Error(w, "internal", http.StatusInternalServerError)
             return
         }
         if err := gateway.AckNotify(ch, w); err != nil {
-            engine.Logger().ErrorContext(r.Context(), "ack notify failed",
-                slog.Any("error", err))
+            engine.Logger().Error(r.Context(), "ack notify failed",
+                orderflow.Err(err))
         }
     }
 }
@@ -936,7 +962,7 @@ go worker.StartAll(ctx, engine)  // 三个 worker 一次起：CloseWorker / Clos
 ## 相关约束
 
 - **Go 1.26.2+**
-- 日志通过 `*slog.Logger` 注入；接入 `github.com/gtkit/logger` 使用 `slog.New(logger.SlogHandler())`。
+- 日志通过 `orderflow.Logger` 接口注入（核心包零外部日志依赖）；推荐包装 `github.com/gtkit/logger`，包装示例见 Step 8 与 [`logger.go`](./logger.go) GoDoc。**禁止**使用 `log/slog`。
 - JSON 序列化统一使用 `github.com/gtkit/json`，禁止使用 `encoding/json`。
 - Redis 集群：`rediszq` 的 key 必须带 hash tag（如 `"{orderflow}:delay:close"`）。
 - 生产告警：日志中 `"orderflow: ALERT ..."` 与 `"orderflow: panic in ... recovered"` 开头的 ERROR 必须配告警。

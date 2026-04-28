@@ -16,6 +16,12 @@
 
 ### Security
 
+## [1.3.1] - 2026-04-28
+
+### Fixed
+- 修复 v1.3.0 README 残留的 6 处 `slog` 代码示例（Step 8 的 `slog.SetDefault` / `Logger: slog.Default()`、Step 10 notify handler 的 `engine.Logger().ErrorContext + slog.Any` 两处、"相关约束"章节的 "通过 `*slog.Logger` 注入" 描述）。这些示例在 v1.3.0 移除 `*slog.Logger` 后已与代码不一致，下游照抄会编译失败
+- Step 8 加入完整的 `gtkitLogger` 包装示例代码（实现 `orderflow.Logger` 接口，把 4 方法转发到 `github.com/gtkit/logger` 的 `DebugCtx/InfoCtx/WarnCtx/ErrorCtx` 包级函数）
+
 ## [1.3.0] - 2026-04-28
 
 ⚠ **破坏性变更**：移除 `*slog.Logger`，改用自定义 `orderflow.Logger` 接口。详见下方"Removed/Changed"。
