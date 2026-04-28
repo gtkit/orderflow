@@ -33,6 +33,7 @@
 - `drivers/gormstore.Config.FinalizeExtra` GoDoc 明确强约束：仅允许同事务内的 DB 操作，禁止 RPC / HTTP / MQ 等外部 IO，防止行锁持有时间膨胀引发热点行锁堆积。外部副作用应放在 `OnDelivered` 钩子或独立事件总线消费链路
 - `Engine.Create` 抢跑路径补注释：`closeSuperseded` 命中"网关已扣款"时返回的 order 金额是**旧 product** 的，客户端 UI 应基于 `CreateResult.Reused=true` 引导用户跳详情页而非展示新 product 的支付页
 - `chaos_test.go` 场景 5 注释更新：明确"未配 Locker 时存在该限制"——此前的"已知限制"描述滞后于 v1.0.0 引入的 `Config.Locker`
+- `StatusCache` 接口与 README 新增"Token 撤销 / 风控止血"章节：明确业务方可通过 `cache.Delete(orderToken)` + 自维护黑名单实现 token 撤销，库保持中立不内置黑名单
 
 ### Deprecated
 
