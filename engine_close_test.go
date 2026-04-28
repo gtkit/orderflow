@@ -279,6 +279,50 @@ func TestFindPaidUndelivered_PassthroughToStore(t *testing.T) {
 	mustLen(t, got, 2, "paid undelivered count")
 }
 
+// =============================================================================
+// CloseByAdmin —— 强制关单（绕过 ExpireAt）
+// =============================================================================
+
+func TestCloseByAdmin_ClosesUnexpiredPending(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	env.store.seed(&testOrder{
+		orderNo:    "ADM-1",
+		orderToken: "T-ADM",
+		userID:     1001,
+		status:     StatusPending,
+		payMethod:  "wechat",
+		expireAt:   time.Now().Add(time.Hour), // 未过期——标准 Close 会跳过
+	})
+
+	mustNotErr(t, env.engine.CloseByAdmin(ctx, "ADM-1", "fraud:rule-42"), "CloseByAdmin")
+	mustEqual(t, env.store.byNo["ADM-1"].status, StatusClosed, "final status")
+	mustEqual(t, env.gw.CloseOrderCalls, 1, "Gateway.CloseOrderCalls")
+	mustEqual(t, env.store.CASCloseCalls, 1, "CASClose calls")
+	mustLen(t, env.OnClosedCalls, 1, "OnClosed")
+	mustEqual(t, env.OnClosedCalls[0].Reason, ClosedReasonManual, "OnClosed reason")
+	// 流水带 admin actor + reason
+	mustEqual(t, env.store.logs[0].Actor, "admin", "log actor")
+}
+
+func TestCloseByAdmin_SkipsNonPending(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	env.store.seed(&testOrder{orderNo: "ADM-2", status: StatusPaid, expireAt: time.Now().Add(time.Hour)})
+	mustNotErr(t, env.engine.CloseByAdmin(ctx, "ADM-2", "any"), "CloseByAdmin should skip Paid")
+	mustEqual(t, env.store.byNo["ADM-2"].status, StatusPaid, "status unchanged")
+	mustEqual(t, env.gw.CloseOrderCalls, 0, "no gateway call")
+}
+
+func TestCloseByAdmin_NotFoundReturnsErrOrderNotFound(t *testing.T) {
+	env := newTestEnv(t)
+	if err := env.engine.CloseByAdmin(context.Background(), "MISSING", ""); !errors.Is(err, ErrOrderNotFound) {
+		t.Fatalf("want ErrOrderNotFound, got %v", err)
+	}
+}
+
 func TestClampLimit(t *testing.T) {
 	cases := []struct {
 		in, want int

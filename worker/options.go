@@ -1,6 +1,9 @@
 package worker
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 const (
 	defaultPollInterval  = time.Second
@@ -54,6 +57,27 @@ func (o CloseOptions) withDefaults() CloseOptions {
 		o.AckTimeout = defaultAckTimeout
 	}
 	return o
+}
+
+// Validate 校验字段间的合理性约束。
+//
+// 检查项：
+//   - PollLease >= 2 * CloseTimeout：确保任务有足够时间完成处理 + Ack。
+//     若 lease 过短，正在执行的 Close 还没完，任务就会被另一实例 RequeueExpired
+//     重抢，触发重复执行（engine.Close 幂等不出错，但浪费 DB 资源）。
+//   - AckTimeout < CloseTimeout：Ack 应远快于 Close（Ack 只是删 Redis ZSET 成员）。
+//
+// 由 NewCloseWorker 在构造时自动调用；用户也可手动调用做配置预检。
+func (o CloseOptions) Validate() error {
+	if o.PollLease < 2*o.CloseTimeout {
+		return fmt.Errorf("worker: PollLease (%s) must be >= 2*CloseTimeout (%s) to avoid premature requeue",
+			o.PollLease, o.CloseTimeout)
+	}
+	if o.AckTimeout >= o.CloseTimeout {
+		return fmt.Errorf("worker: AckTimeout (%s) should be smaller than CloseTimeout (%s)",
+			o.AckTimeout, o.CloseTimeout)
+	}
+	return nil
 }
 
 // CloseFallbackOptions 控制 CloseFallback 扫描节奏。

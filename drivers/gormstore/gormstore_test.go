@@ -398,7 +398,7 @@ func TestStore_FindExpiredPending(t *testing.T) {
 }
 
 func TestStore_FindPaidUndelivered(t *testing.T) {
-	s, _ := newTestStore(t)
+	s, db := newTestStore(t)
 	now := time.Now().Add(time.Hour)
 	seedOrder(t, s, &orderRow{
 		OrderNoCol: "P1", OrderTokenCol: "T1", UserIDCol: 1, ProductIDCol: 1,
@@ -410,6 +410,14 @@ func TestStore_FindPaidUndelivered(t *testing.T) {
 		StatusCol: orderflow.StatusDelivered, ExpireAtCol: now,
 		PayAmountCol: 1, OriginalPriceCol: 1,
 	})
+	// paid_at 设置为远早于 PaidUndeliveredRetryGrace（默认 60s），保证落入扫描窗口。
+	// 反映生产语义：fallback 仅扫"已 Paid 一段时间但仍未 Delivered"的订单，避免与
+	// 正常 OnPaid 路径抢锁。
+	oldPaidAt := time.Now().Add(-10 * time.Minute)
+	if err := db.Table("orders_test").Where("order_no = ?", "P1").
+		Update("paid_at", oldPaidAt).Error; err != nil {
+		t.Fatalf("seed paid_at: %v", err)
+	}
 
 	got, err := s.FindPaidUndelivered(context.Background(), 10)
 	if err != nil {
@@ -417,6 +425,24 @@ func TestStore_FindPaidUndelivered(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "P1" {
 		t.Errorf("got %v, want [P1]", got)
+	}
+
+	// 边界用例：刚 Paid（paid_at = now）的订单应被 retry grace 过滤，不在扫描结果中。
+	seedOrder(t, s, &orderRow{
+		OrderNoCol: "P2", OrderTokenCol: "T3", UserIDCol: 1, ProductIDCol: 3,
+		StatusCol: orderflow.StatusPaid, ExpireAtCol: now,
+		PayAmountCol: 1, OriginalPriceCol: 1,
+	})
+	if err := db.Table("orders_test").Where("order_no = ?", "P2").
+		Update("paid_at", time.Now()).Error; err != nil {
+		t.Fatalf("seed fresh paid_at: %v", err)
+	}
+	got, err = s.FindPaidUndelivered(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("FindPaidUndelivered (with fresh): %v", err)
+	}
+	if len(got) != 1 || got[0] != "P1" {
+		t.Errorf("fresh paid order should be filtered by retry grace, got %v, want [P1]", got)
 	}
 }
 

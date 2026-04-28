@@ -5,8 +5,34 @@
 ## [Unreleased]
 
 ### Added
+- `Engine.Healthy(ctx)` 健康检查：依赖能力可选实现 `orderflow.Healther` 接口（含 `Ping(ctx) error`）即可被聚合探测，用于 K8s readiness probe / 启动自检
+- `Engine.CloseByAdmin(ctx, orderNo, reason)` 强制关单 API：**绕过 ExpireAt 守卫**，但仍然只对 `Pending` 订单生效；适用于风控 / 客服强制取消，actor 标记为 `admin`，reason 写入流水
+- `worker.CloseOptions.Validate()` 字段间合理性校验：`PollLease >= 2*CloseTimeout` 避免任务在 lease 过期前没处理完被另一实例重抢；`AckTimeout < CloseTimeout` 防止配置反转。`NewCloseWorker` 启动期自动 WARN 日志，但不阻断启动
+- `drivers/gormstore.AutoMigrate(db, billTable, logTable)` 帮 helper：自动建 `OrderBill` / `OrderLog` 内置表（订单表仍由业务方自管）
+- `drivers/gormstore.ColumnMap.ChannelID` 新增列名映射；`FinalizePaidOrder` 在事务内自动回查 `channel_id` 列补到 bill 表，使"按渠道对账"无需业务方再改 `BillSpec` 即可开箱可用
+- `drivers/gormstore.Config` 新增 `PaidUndeliveredRetryGrace` 字段，控制 `FindPaidUndelivered` 时间窗口下界（默认 60s）。给"刚 Paid 的订单"留出走正常 OnPaid 路径的时间，避免 `DeliveryFallback` 与正常 finalize 路径反复抢锁导致 OnPaid 钩子被无谓重入
+- `Engine.PollStatus` 接入 Observer.Duration 埋点（`OpPollStatus`），补齐 Create / HandleNotify / Close / ReconcilePaid 之外的最后一个核心读路径耗时观测
+- `Engine.PollStatus` 在 cache.Get 返回 err 时（区别于 miss）记录 ALERT 日志 + `EventAnomaly`（kind=`poll_cache_get_failed`），让运维感知缓存抖动而不是静默回源 DB
+- `Engine.appendLog` 失败时同步发出 `EventAnomaly`（kind=`append_log_failed`），让 Prometheus 侧能基于 anomaly counter 配置告警，避免 audit 流水静默丢失
+- 所有业务钩子（`OnCreated` / `OnPaid` / `OnDelivered` / `OnClosed` / `OnReopened` / `OnSuperseded` / `OnAnomaly`）调用增加 panic recover 包装：第三方实现 panic 不再冲破 `Create` / `HandleNotify` / `Close` 主流程，改为记录 ERROR 日志 + 发 `EventAnomaly`（kind=`hook_panic`）；error-returning 钩子的 panic 被转成 error 让补偿路径仍能兜底
+- `.github/workflows/ci.yml` GitHub Actions：每个 PR / push 自动跑 vet + race test 矩阵（root + 4 个 driver）+ `scripts/check-release.sh`
 
 ### Changed
+- `Engine.Create` 调整持锁时长：仅锁 `FindPending → CASClose(superseded) → store.Create → Enqueue` 这段产生新 Pending 行的关键区段，**支付网关 RTT 走锁外**。修复了网关偶发慢于 `createLockTTL` 时锁过期、并发 Create 拿到锁后再次创建 Pending、破坏"一用户一商品一 Pending"不变量的问题
+- `Engine.Create` 钩子事件序列对称化：延时队列入队失败的 rollback 路径不再触发 `OnClosed` 钩子。订单从未对业务侧可见（OnCreated 还未调用），触发 OnClosed 会让事件总线收到"凭空冒出来的关闭事件"。Observer 事件保留以便运维观测，业务钩子保持事件序列对称
+- `Engine.New` 增加 `OrderExpire` 上下界校验：`< 1s` 与 `> 24h` 都拒绝（前者明显误填，后者会与 `defaultTerminalTTL` 等默认 TTL 严重错配）；`CreateLockTTL` 也校验 ≥ 0
+- `drivers/gormstore.FindExpiredPending` 显式按 `expire_at ASC` 排序，多 worker 副本看到一致的扫描优先级，减少 CAS 抢锁浪费
+- `drivers/gormstore.FindPaidUndelivered` 改为按 `paid_at < NOW - PaidUndeliveredRetryGrace` 过滤，并按 `paid_at ASC` 排序
+- `drivers/gormstore.FindPendingByUserAndProduct` 显式按 `updated_at DESC` 排序：若历史上漏防御产生过多条同 `(user, product, pending)`，固定取最新一条作为复用对象，旧的让 `CloseFallback` 在 ExpireAt 后回收
+- `drivers/gormstore.FinalizePaidOrder` 在 `affected=0` 路径补充二次 SELECT，错误信息附带订单当前真实状态（如 `current=delivered` 表示重入、`current=closed` 表示并发关闭异常），便于运维定位
+
+### Documentation
+- `drivers/rediscache.Locker` GoDoc 加红字警告：本实现**不适合 Redis 主从异步复制下的故障切换**——切换瞬间可能出现"双客户端持同一锁"。对一致性敏感的场景应改用 [redsync](https://github.com/go-redsync/redsync) 跑多实例 Redlock
+- `drivers/gormstore` 包注释新增"必备索引清单"章节：列出 `(status, expire_at)`、`(status, paid_at)`、`(user_id, product_id, status)` 等 fallback 与查询路径所需的 DB 索引
+- `OrderSnapshot.OrderToken` GoDoc 补强："必须只在订单所有者会话内传递，不要把含 token 的 URL 入分享链接 / 邮件 / 短信"——攻击者拿到 token + user_id 即可订阅状态变更，可能泄露用户支付节奏
+- `drivers/gormstore.Config.FinalizeExtra` GoDoc 明确强约束：仅允许同事务内的 DB 操作，禁止 RPC / HTTP / MQ 等外部 IO，防止行锁持有时间膨胀引发热点行锁堆积。外部副作用应放在 `OnDelivered` 钩子或独立事件总线消费链路
+- `Engine.Create` 抢跑路径补注释：`closeSuperseded` 命中"网关已扣款"时返回的 order 金额是**旧 product** 的，客户端 UI 应基于 `CreateResult.Reused=true` 引导用户跳详情页而非展示新 product 的支付页
+- `chaos_test.go` 场景 5 注释更新：明确"未配 Locker 时存在该限制"——此前的"已知限制"描述滞后于 v1.0.0 引入的 `Config.Locker`
 
 ### Deprecated
 

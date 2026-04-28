@@ -3,10 +3,61 @@ package orderflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"time"
 )
+
+// safeHook 调用一个无返回值的业务钩子，并捕获 panic。
+//
+// Engine 不对业务钩子的实现加 recover 是历史决定（钩子约定"不应 panic"），但约定靠
+// 自觉——业务侧接 Prometheus / OpenTelemetry / 第三方 SDK 时一旦 panic，会冲破
+// HandleNotify / Create 主流程：CAS 已成功但请求异常退出，支付网关收不到 ACK 触发
+// 重试风暴。这里把第三方实现错误隔离到钩子自身，让 Engine 始终视钩子为"绝不失败"。
+//
+// orderNo 可能为空（比如钩子绑在尚未生成订单号的早期路径上）。
+func (e *Engine[O]) safeHook(ctx context.Context, name, orderNo string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			e.logger.ErrorContext(ctx, "orderflow: hook panic recovered",
+				slog.String("hook", name),
+				slog.String("order_no", orderNo),
+				slog.Any("panic", r),
+			)
+			e.observer.Event(ctx, EventAnomaly, orderNo, map[string]any{
+				"kind":  "hook_panic",
+				"hook":  name,
+				"panic": fmt.Sprint(r),
+			})
+		}
+	}()
+	fn()
+}
+
+// safeHookE 调用一个返回 error 的业务钩子，并把 panic 转成 error。
+//
+// 与 safeHook 不同的是：error-returning 钩子（OnPaid / OnCreated / OnDelivered）的
+// 错误会被主流程消费——OnPaid 失败会触发补偿重试。把 panic 转成 error 让补偿路径
+// 仍然有机会兜底，而不是中断整个 HandleNotify。
+func (e *Engine[O]) safeHookE(ctx context.Context, name, orderNo string, fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("orderflow: hook %s panic: %v", name, r)
+			e.logger.ErrorContext(ctx, "orderflow: hook panic recovered",
+				slog.String("hook", name),
+				slog.String("order_no", orderNo),
+				slog.Any("panic", r),
+			)
+			e.observer.Event(ctx, EventAnomaly, orderNo, map[string]any{
+				"kind":  "hook_panic",
+				"hook":  name,
+				"panic": fmt.Sprint(r),
+			})
+		}
+	}()
+	return fn()
+}
 
 // publishStatus 将订单状态同步到缓存与订阅通道。
 // 缓存失败视为严重错误（会回删保证一致性），推送失败仅降级为轮询（警告）。
@@ -59,7 +110,11 @@ func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID
 	}
 }
 
-// appendLog 写一条订单状态流水。失败降级为警告日志，不阻断主流程。
+// appendLog 写一条订单状态流水。失败降级为警告日志 + Observer 异常事件，不阻断主流程。
+//
+// 发 EventAnomaly 的目的：审计/合规场景下流水丢失是严重事件——DBA 误删 log 表、
+// 表满、磁盘满等情况下，仅记本地 warn 日志运维不会感知。Observer 事件让 Prometheus
+// 侧能基于 anomaly counter 配置告警。
 func (e *Engine[O]) appendLog(ctx context.Context, order O, from, to OrderStatus, actor, remark string) {
 	entry := LogEntry{
 		OrderNo:    order.OrderNo(),
@@ -73,8 +128,17 @@ func (e *Engine[O]) appendLog(ctx context.Context, order O, from, to OrderStatus
 	if err := e.store.AppendLog(ctx, entry); err != nil {
 		e.logger.WarnContext(ctx, "orderflow: append order log failed",
 			slog.String("order_no", order.OrderNo()),
+			slog.String("from", from.String()),
+			slog.String("to", to.String()),
 			slog.Any("error", err),
 		)
+		e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
+			"kind":   "append_log_failed",
+			"from":   from.String(),
+			"to":     to.String(),
+			"actor":  actor,
+			"reason": err.Error(),
+		})
 	}
 }
 
@@ -90,7 +154,9 @@ func (e *Engine[O]) recordAnomaly(ctx context.Context, order O, kind AnomalyKind
 		"detail": detail,
 	})
 	if e.onAnomaly != nil {
-		e.onAnomaly(ctx, order, kind, detail)
+		e.safeHook(ctx, "OnAnomaly", order.OrderNo(), func() {
+			e.onAnomaly(ctx, order, kind, detail)
+		})
 	}
 }
 

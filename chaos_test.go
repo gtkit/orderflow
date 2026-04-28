@@ -301,22 +301,28 @@ func TestChaos_OrderNoStrictMonotonicAcrossClockSkew(t *testing.T) {
 }
 
 // =============================================================================
-// 场景 5：大批量 Create 同用户同商品——暴露 Engine 的并发限制
+// 场景 5：大批量 Create 同用户同商品——验证未配 Locker 时的行为
 // =============================================================================
 //
 // 模拟：用户在前端快速点击"支付"按钮 50 次，后端 50 个 goroutine 同时调 Create。
 //
-// **重要发现**：Engine 的 Create 不做跨请求串行化——`FindPendingByUserAndProduct`
-// 只是 SELECT，不锁行；多个并发 goroutine 会同时读到"无 Pending"，各自 INSERT 出独立订单。
-// 这是**已知限制**，文档（doc.go "调用方鉴权责任"章节）应明示。
+// **行为说明**：未注入 Config.Locker 时，Engine 不做跨请求串行化——
+// `FindPendingByUserAndProduct` 只是 SELECT，不锁行；多个并发 goroutine 会同时
+// 读到"无 Pending"，各自 INSERT 出独立订单。这是 v1.0.0 起的已知行为。
 //
-// 断言的实际不变量：
+// 解决方案（生产推荐三层防御）：
+//   1. 注入 Config.Locker（如 drivers/rediscache.NewLocker）→ Engine 自动按
+//      (user_id, product_id) 串行化 Create。
+//   2. DB 部分唯一索引：UNIQUE (user_id, product_id) WHERE status = pending。
+//   3. 前端 / API 网关层 debounce。
+//
+// 此测试覆盖的是"未配 Locker"的兜底语义：
 //   - 全部调用要么成功（有订单写入）要么返回 ErrInvalidConfig（不该，因入参都合法）；
 //   - 每个返回的 CreateResult 对应唯一 orderNo / orderToken；
 //   - 全部订单在延时队列里有对应 member，依赖 CloseWorker 自然关闭兜底；
 //   - 无 OnAnomaly 触发（没有状态机异常）。
 //
-// 如果业务需要严格"一用户一商品一 Pending"，必须在业务层做幂等（分布式锁 / DB 唯一索引 / debounce）。
+// 注入 Locker 后的串行化语义见 TestCreate_WithLocker_SerializesSameUserProduct。
 
 func TestChaos_ConcurrentCreateSameProduct(t *testing.T) {
 	const N = 50

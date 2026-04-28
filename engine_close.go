@@ -75,7 +75,9 @@ func (e *Engine[O]) Close(ctx context.Context, orderNo string) (err error) {
 		"reason": string(ClosedReasonTimeout),
 	})
 	if e.onClosed != nil {
-		e.onClosed(ctx, order, ClosedReasonTimeout)
+		e.safeHook(ctx, "OnClosed", order.OrderNo(), func() {
+			e.onClosed(ctx, order, ClosedReasonTimeout)
+		})
 	}
 	e.logger.InfoContext(ctx, "orderflow: order closed",
 		slog.String("order_no", orderNo),
@@ -89,7 +91,7 @@ func (e *Engine[O]) Close(ctx context.Context, orderNo string) (err error) {
 //
 // 注意：仅校验 UserID 归属；订单状态、过期时间等由下层 Close 检查。
 // 未过期的 Pending 订单仍会被 Close skip（Close 对非过期订单幂等跳过），
-// 若业务需要"立即取消未过期订单"的语义，应额外调用 Store.CASClose 或扩展本 API。
+// 若业务需要"立即取消未过期订单"的语义，应使用 CloseByAdmin 或调用 Store.CASClose。
 func (e *Engine[O]) CloseByUser(ctx context.Context, userID int64, orderNo string) error {
 	order, found, err := e.store.GetByNo(ctx, orderNo)
 	if err != nil {
@@ -102,6 +104,67 @@ func (e *Engine[O]) CloseByUser(ctx context.Context, userID int64, orderNo strin
 		return ErrOrderForbidden
 	}
 	return e.Close(ctx, orderNo)
+}
+
+// CloseByAdmin 强制关闭订单，**绕过 ExpireAt 守卫**。
+//
+// 适用场景：管理员后台"强制取消"、风控系统"异常订单关闭"、客服处理用户申诉。
+// 与 Close 的差异：不检查 order.ExpireAt() 是否到期——未过期的 Pending 订单也能直接关。
+//
+// 仍然保留的安全约束：
+//   - 仅 Pending 订单可被关闭（Paid/Delivered 状态调用本方法返回 nil 跳过，避免误关已支付订单）；
+//   - 网关 CloseOrder 仍会被调用 + 重试；
+//   - 状态推送、流水、OnClosed 钩子全部触发，actor 标记为 admin。
+//
+// reason 参数会写入流水的 remark 字段，便于事后审计。建议传业务定义的"风控规则 ID"
+// 或"客服工单号"，便于追溯。
+func (e *Engine[O]) CloseByAdmin(ctx context.Context, orderNo, reason string) error {
+	order, found, err := e.store.GetByNo(ctx, orderNo)
+	if err != nil {
+		return fmt.Errorf("orderflow: query order for CloseByAdmin: %w", err)
+	}
+	if !found {
+		return ErrOrderNotFound
+	}
+	if order.Status() != StatusPending {
+		e.logger.InfoContext(ctx, "orderflow: admin close skipped: order not pending",
+			"order_no", orderNo,
+			"status", order.Status().String(),
+		)
+		return nil
+	}
+
+	if afterErr := e.afterClose(ctx, order); afterErr != nil {
+		e.appendLog(ctx, order, StatusPending, StatusPending, "admin",
+			"gateway close failed during admin close: "+afterErr.Error())
+		return fmt.Errorf("orderflow: admin gateway close: %w", afterErr)
+	}
+
+	affected, err := e.store.CASClose(ctx, orderNo)
+	if err != nil {
+		return fmt.Errorf("orderflow: admin cas close: %w", err)
+	}
+	if affected == 0 {
+		// 状态被并发推进——常见情形：支付回调先到。Close 路径的标准行为是 skip。
+		return nil
+	}
+
+	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusClosed, order.ExpireAt())
+	remark := "admin force close"
+	if reason != "" {
+		remark = "admin force close: " + reason
+	}
+	e.appendLog(ctx, order, StatusPending, StatusClosed, "admin", remark)
+	e.observer.Event(ctx, EventOrderClosed, order.OrderNo(), map[string]any{
+		"reason": string(ClosedReasonManual),
+		"actor":  "admin",
+	})
+	if e.onClosed != nil {
+		e.safeHook(ctx, "OnClosed", order.OrderNo(), func() {
+			e.onClosed(ctx, order, ClosedReasonManual)
+		})
+	}
+	return nil
 }
 
 // afterClose 调用支付网关关闭订单，带 3 次重试和可忽略错误容忍。

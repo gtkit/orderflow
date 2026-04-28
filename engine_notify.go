@@ -241,7 +241,9 @@ func (e *Engine[O]) handleClosedPaidNotify(ctx context.Context, order O, notify 
 	refreshed := e.reloadOrder(ctx, order)
 
 	if e.onReopened != nil {
-		e.onReopened(ctx, refreshed, confirmed)
+		e.safeHook(ctx, "OnReopened", refreshed.OrderNo(), func() {
+			e.onReopened(ctx, refreshed, confirmed)
+		})
 	}
 
 	if err := e.finalizeDelivery(ctx, refreshed, confirmed); err != nil {
@@ -264,9 +266,12 @@ func (e *Engine[O]) handleClosedPaidNotify(ctx context.Context, order O, notify 
 // 任一步骤失败都会触发 AnomalyDeliveryFailed，由 fallback scanner 后续补偿。
 func (e *Engine[O]) finalizeDelivery(ctx context.Context, order O, notify NotifyResult) error {
 	if e.onPaid != nil {
-		if err := e.onPaid(ctx, order, notify); err != nil {
-			e.recordAnomaly(ctx, order, AnomalyDeliveryFailed, "OnPaid: "+err.Error())
-			return fmt.Errorf("orderflow: OnPaid: %w", err)
+		hookErr := e.safeHookE(ctx, "OnPaid", order.OrderNo(), func() error {
+			return e.onPaid(ctx, order, notify)
+		})
+		if hookErr != nil {
+			e.recordAnomaly(ctx, order, AnomalyDeliveryFailed, "OnPaid: "+hookErr.Error())
+			return fmt.Errorf("orderflow: OnPaid: %w", hookErr)
 		}
 	}
 
@@ -295,10 +300,13 @@ func (e *Engine[O]) finalizeDelivery(ctx context.Context, order O, notify Notify
 	})
 
 	if e.onDelivered != nil {
-		if err := e.onDelivered(ctx, order); err != nil {
+		hookErr := e.safeHookE(ctx, "OnDelivered", order.OrderNo(), func() error {
+			return e.onDelivered(ctx, order)
+		})
+		if hookErr != nil {
 			e.logger.WarnContext(ctx, "orderflow: OnDelivered hook returned error",
 				slog.String("order_no", order.OrderNo()),
-				slog.Any("error", err),
+				slog.Any("error", hookErr),
 			)
 		}
 	}

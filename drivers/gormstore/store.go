@@ -20,7 +20,14 @@ import (
 //
 // 可选：
 //   - ColumnMap：订单表列名覆盖（零值字段走默认值）
-//   - FinalizeExtra：FinalizePaidOrder 事务内的业务扩展钩子，用于在同一事务里激活 VIP / 发放积分等
+//   - FinalizeExtra：FinalizePaidOrder 事务内的业务扩展钩子，**仅允许同事务内的
+//     DB 操作**——禁止在此发起 RPC、HTTP、消息队列等外部 IO，否则会让该订单的
+//     行锁持有时间膨胀到外部 RTT 量级，引发热点行锁堆积。外部副作用应放在
+//     OnDelivered 钩子（旁路、不阻断）或独立的事件总线消费链路。
+//   - PaidUndeliveredRetryGrace：FindPaidUndelivered 的 paid_at 时间窗口下界。
+//     该值用于过滤"刚 Paid 不久、正在被正常 OnPaid 路径处理"的订单，避免
+//     DeliveryFallback 与正常路径反复抢锁导致 OnPaid 被无谓重入。零值使用默认
+//     60s。业务对补偿延迟敏感时可调小，但不建议小于 10s。
 type Config[O orderflow.OrderSnapshot, M any] struct {
 	DB *gorm.DB
 
@@ -34,6 +41,8 @@ type Config[O orderflow.OrderSnapshot, M any] struct {
 	ColumnMap ColumnMap
 
 	FinalizeExtra func(tx *gorm.DB, order O, bill *OrderBill) error
+
+	PaidUndeliveredRetryGrace time.Duration
 }
 
 func (c Config[O, M]) validate() error {
@@ -71,16 +80,21 @@ func (c Config[O, M]) validate() error {
 	return nil
 }
 
+// defaultPaidUndeliveredRetryGrace 是 FindPaidUndelivered 的默认时间窗口下界。
+// 给"刚 Paid"的订单留 60s 走正常 OnPaid 路径，避免 fallback worker 立即抢入。
+const defaultPaidUndeliveredRetryGrace = 60 * time.Second
+
 // Store 基于 GORM 的 orderflow.Store[O] 实现。
 type Store[O orderflow.OrderSnapshot, M any] struct {
-	db            *gorm.DB
-	orderTable    string
-	billTable     string
-	logTable      string
-	cols          ColumnMap
-	wrap          func(*M) O
-	buildModel    func(orderflow.OrderSpec) *M
-	finalizeExtra func(tx *gorm.DB, order O, bill *OrderBill) error
+	db                        *gorm.DB
+	orderTable                string
+	billTable                 string
+	logTable                  string
+	cols                      ColumnMap
+	wrap                      func(*M) O
+	buildModel                func(orderflow.OrderSpec) *M
+	finalizeExtra             func(tx *gorm.DB, order O, bill *OrderBill) error
+	paidUndeliveredRetryGrace time.Duration
 }
 
 // New 构造 Store。参数非法时返回错误。
@@ -88,15 +102,20 @@ func New[O orderflow.OrderSnapshot, M any](cfg Config[O, M]) (*Store[O, M], erro
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	grace := cfg.PaidUndeliveredRetryGrace
+	if grace <= 0 {
+		grace = defaultPaidUndeliveredRetryGrace
+	}
 	return &Store[O, M]{
-		db:            cfg.DB,
-		orderTable:    cfg.OrderTable,
-		billTable:     cfg.BillTable,
-		logTable:      cfg.LogTable,
-		cols:          cfg.ColumnMap.withDefaults(),
-		wrap:          cfg.Wrap,
-		buildModel:    cfg.BuildModel,
-		finalizeExtra: cfg.FinalizeExtra,
+		db:                        cfg.DB,
+		orderTable:                cfg.OrderTable,
+		billTable:                 cfg.BillTable,
+		logTable:                  cfg.LogTable,
+		cols:                      cfg.ColumnMap.withDefaults(),
+		wrap:                      cfg.Wrap,
+		buildModel:                cfg.BuildModel,
+		finalizeExtra:             cfg.FinalizeExtra,
+		paidUndeliveredRetryGrace: grace,
 	}, nil
 }
 
@@ -143,12 +162,19 @@ func (s *Store[O, M]) ListByUser(ctx context.Context, userID int64, fields ...st
 	return out, nil
 }
 
+// FindPendingByUserAndProduct 返回该用户+该商品最新的一条 Pending 订单。
+//
+// 显式按 updated_at DESC 排序的原因：理论上"一用户一商品一 Pending"是不变量，
+// 但若历史上漏防御产生过多条同 (user, product, pending)，GORM 默认按主键排序
+// 会让"复用单"的选择依赖 DB 内部状态。这里固定取最新一条作为复用对象，旧的让
+// CloseFallback 在 ExpireAt 后回收。
 func (s *Store[O, M]) FindPendingByUserAndProduct(ctx context.Context, userID int64, productID uint64) (O, bool, error) {
 	var zero O
 	m := new(M)
 	err := s.db.WithContext(ctx).Table(s.orderTable).
 		Where(s.cols.UserID+" = ? AND "+s.cols.ProductID+" = ? AND "+s.cols.Status+" = ?",
 			userID, productID, orderflow.StatusPending).
+		Order(s.cols.UpdatedAt + " DESC").
 		First(m).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return zero, false, nil
@@ -159,32 +185,49 @@ func (s *Store[O, M]) FindPendingByUserAndProduct(ctx context.Context, userID in
 	return s.wrap(m), true, nil
 }
 
+// FindExpiredPending 返回已过期且仍为 Pending 的订单号，供 CloseFallback 兜底。
+//
+// 按 expire_at ASC 排序：多 worker 副本看到一致的扫描优先级（先关闭最早过期的），
+// 减少多实例同时抢同一批订单导致的 CAS 抢锁浪费。Close 本身幂等不会出错，但行锁
+// 竞争会拖慢正常订单处理。
 func (s *Store[O, M]) FindExpiredPending(ctx context.Context, limit int) ([]string, error) {
 	return s.findOrderNos(ctx,
 		s.cols.Status+" = ? AND "+s.cols.ExpireAt+" < ?",
 		[]any{orderflow.StatusPending, time.Now()},
 		limit,
+		s.cols.ExpireAt+" ASC",
 	)
 }
 
+// FindPaidUndelivered 返回"已 Paid 但尚未 Delivered"的订单号，供 DeliveryFallback 兜底。
+//
+// 时间窗口：仅返回 paid_at < NOW - PaidUndeliveredRetryGrace 的订单。
+// 这层窗口给"刚 Paid 的订单"留出走正常 OnPaid 路径的时间，避免 fallback worker
+// 与正常 finalizeDelivery 抢行锁，反复触发 OnPaid 钩子（业务侧虽然能靠幂等收敛，
+// 但避免不必要的重入仍是更好的设计）。
 func (s *Store[O, M]) FindPaidUndelivered(ctx context.Context, limit int) ([]string, error) {
+	cutoff := time.Now().Add(-s.paidUndeliveredRetryGrace)
 	return s.findOrderNos(ctx,
-		s.cols.Status+" = ?",
-		[]any{orderflow.StatusPaid},
+		s.cols.Status+" = ? AND "+s.cols.PaidAt+" < ?",
+		[]any{orderflow.StatusPaid, cutoff},
 		limit,
+		s.cols.PaidAt+" ASC",
 	)
 }
 
-func (s *Store[O, M]) findOrderNos(ctx context.Context, where string, args []any, limit int) ([]string, error) {
+// findOrderNos 公共扫描路径。orderBy 必须是已校验的列名 + ASC/DESC，调用方控制。
+func (s *Store[O, M]) findOrderNos(ctx context.Context, where string, args []any, limit int, orderBy string) ([]string, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	var orderNos []string
-	err := s.db.WithContext(ctx).Table(s.orderTable).
+	q := s.db.WithContext(ctx).Table(s.orderTable).
 		Where(where, args...).
-		Limit(limit).
-		Pluck(s.cols.OrderNo, &orderNos).Error
-	if err != nil {
+		Limit(limit)
+	if orderBy != "" {
+		q = q.Order(orderBy)
+	}
+	var orderNos []string
+	if err := q.Pluck(s.cols.OrderNo, &orderNos).Error; err != nil {
 		return nil, fmt.Errorf("gormstore: find order nos: %w", err)
 	}
 	return orderNos, nil

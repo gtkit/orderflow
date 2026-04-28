@@ -213,11 +213,12 @@ func TestCreate_EnqueueFailureRollsBackToClosed(t *testing.T) {
 	mustEqual(t, env.store.CreateCalls, 1, "Store.CreateCalls")
 	mustEqual(t, env.store.CASCloseCalls, 1, "Store.CASCloseCalls (rollback)")
 
-	// 唯一的订单应处于 Closed 状态
-	mustLen(t, env.OnClosedCalls, 1, "OnClosed (enqueue_fail)")
-	mustEqual(t, env.OnClosedCalls[0].Reason, ClosedReasonEnqueueFail, "OnClosed reason")
+	// rollback 路径不应触发任何业务钩子：订单从未对业务侧可见（OnCreated 也未被调用）
+	// 触发 OnClosed 会让事件总线收到一个"凭空冒出来的关闭事件"，破坏事件序列对称性。
+	mustLen(t, env.OnCreatedCalls, 0, "OnCreated should not fire on enqueue rollback")
+	mustLen(t, env.OnClosedCalls, 0, "OnClosed should not fire on enqueue rollback (no matching OnCreated)")
 
-	// Cache 应写了 Closed
+	// Cache 应写了 Closed（cache/observer 是基础设施层，与业务钩子分离）
 	found := false
 	for _, ev := range env.cache.SetHistory {
 		if ev.Status == StatusClosed {

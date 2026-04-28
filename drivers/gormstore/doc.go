@@ -7,6 +7,27 @@
 //   - 订单表的列名通过 ColumnMap 定制，默认值贴合主流命名（order_no / status / trade_no ...）；
 //   - 状态列默认存 orderflow.OrderStatus 的规范整数值（1..6）。业务已有其它编码时需要做一次数据迁移。
 //
+// # 必备索引清单
+//
+// 业务方需要在订单表上建以下索引，否则 fallback worker 与查询路径会全表扫描：
+//
+//	-- 唯一约束（建议）
+//	UNIQUE INDEX uk_order_no    ON orders (order_no);
+//	UNIQUE INDEX uk_order_token ON orders (order_token);
+//
+//	-- fallback 扫描路径
+//	INDEX idx_status_expire_at  ON orders (status, expire_at);  -- FindExpiredPending
+//	INDEX idx_status_paid_at    ON orders (status, paid_at);    -- FindPaidUndelivered
+//
+//	-- 复用查询路径
+//	INDEX idx_user_product_status ON orders (user_id, product_id, status);  -- FindPendingByUserAndProduct
+//	-- 强烈建议加部分唯一索引（PostgreSQL）作为"一用户一商品一 Pending"兜底：
+//	-- CREATE UNIQUE INDEX uk_user_product_pending ON orders (user_id, product_id) WHERE status = 1;
+//	-- MySQL 可用生成列 + 普通唯一索引模拟。
+//
+//	-- 用户列表
+//	INDEX idx_user_id ON orders (user_id);
+//
 // 使用示例：
 //
 //	store, err := gormstore.New[MyView, MyOrder](gormstore.Config[MyView, MyOrder]{

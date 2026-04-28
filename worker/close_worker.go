@@ -34,12 +34,22 @@ func (w *CloseWorker[O]) Stats() Stats {
 }
 
 // NewCloseWorker 构造 CloseWorker。opts 零值等同于所有字段取默认。
+//
+// 字段间合理性约束（PollLease >= 2*CloseTimeout 等）由 opts.Validate 检查。
+// 不合规时会输出 WARN 日志但不阻断启动——用户可能基于自身负载主动放宽。
+// 业务方需要严格验证可在调用前手动 `opts.withDefaults().Validate()`。
 func NewCloseWorker[O orderflow.OrderSnapshot](engine *orderflow.Engine[O], opts CloseOptions) *CloseWorker[O] {
 	opts = opts.withDefaults()
+	logger := engine.Logger()
+	if err := opts.Validate(); err != nil {
+		logger.Warn("orderflow: close worker options validation warning",
+			"error", err.Error(),
+		)
+	}
 	return &CloseWorker[O]{
 		engine: engine,
 		queue:  engine.DelayQueue(),
-		logger: engine.Logger(),
+		logger: logger,
 		opts:   opts,
 		pool:   make(chan struct{}, opts.MaxWorkers),
 	}

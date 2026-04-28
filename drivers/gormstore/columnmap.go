@@ -26,6 +26,10 @@ type ColumnMap struct {
 	DeliveredAt string
 	ExpireAt    string
 	UpdatedAt   string
+	// ChannelID 业务自定义渠道维度。FinalizePaidOrder 会用此列回查并补写到 bill 表，
+	// 让"按渠道对账"在不改 OrderSnapshot 接口的前提下可用。零值默认 "channel_id"，
+	// 业务表无此列时设置一个不存在的列名会触发 SQL 错误——业务方按需关掉补写功能（待支持）。
+	ChannelID string
 }
 
 // SQLIdentifierPattern 是合法 SQL 标识符的正则，公开给 Config.validate 校验表名。
@@ -49,6 +53,7 @@ func (c ColumnMap) validate() error {
 		{"DeliveredAt", c.DeliveredAt},
 		{"ExpireAt", c.ExpireAt},
 		{"UpdatedAt", c.UpdatedAt},
+		{"ChannelID", c.ChannelID},
 	}
 	for _, f := range fields {
 		if f.val == "" {
@@ -91,6 +96,9 @@ func (c ColumnMap) withDefaults() ColumnMap {
 	}
 	if c.UpdatedAt == "" {
 		c.UpdatedAt = "updated_at"
+	}
+	if c.ChannelID == "" {
+		c.ChannelID = "channel_id"
 	}
 	return c
 }

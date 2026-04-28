@@ -58,16 +58,22 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 	}
 
 	// 可选分布式锁：配置 Locker 后，同用户同商品的 Create 串行化。
-	// defer unlock 在 ok=false / err 非 nil 时也无害（Locker 契约要求 unlock 幂等）。
+	//
+	// 锁的范围：仅覆盖 FindPending → CASClose（superseded）→ store.Create → Enqueue
+	// 这段"产生新 Pending 行"的关键区段。**支付网关 RTT 必须在锁外**——否则网关偶发
+	// 慢于 createLockTTL 时锁会过期，并发 Create 拿到锁后再次创建 Pending，破坏
+	// "一用户一商品一 Pending"不变量。
+	var unlock func()
 	if e.locker != nil {
 		lockKey := fmt.Sprintf("orderflow:create:%d:%d", req.UserID, req.Product.ID)
-		unlock, ok, lockErr := e.locker.TryLock(ctx, lockKey, e.createLockTTL)
+		got, ok, lockErr := e.locker.TryLock(ctx, lockKey, e.createLockTTL)
 		if lockErr != nil {
 			err = fmt.Errorf("orderflow: acquire create lock: %w", lockErr)
 			return nil, err
 		}
-		defer unlock()
 		if !ok {
+			// got 在 ok=false 时按契约是 no-op，但仍调用一次保证幂等。
+			got()
 			e.observer.Event(ctx, EventAnomaly, "", map[string]any{
 				"kind":       "concurrent_create_rejected",
 				"user_id":    req.UserID,
@@ -76,6 +82,14 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 			err = ErrConcurrentCreate
 			return nil, err
 		}
+		unlock = got
+		// defer 兜底：异常路径（panic / 早期 return）下确保锁释放。
+		// 主流程会在网关下单**之前**显式 unlock，正常路径下这里只是 no-op。
+		defer func() {
+			if unlock != nil {
+				unlock()
+			}
+		}()
 	}
 
 	existing, found, err := e.store.FindPendingByUserAndProduct(ctx, req.UserID, req.Product.ID)
@@ -84,6 +98,11 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 	}
 	if found {
 		if e.isReusableOf(existing, req) {
+			// 复用路径：本地不需要再持锁，提前释放后调用网关。
+			if unlock != nil {
+				unlock()
+				unlock = nil
+			}
 			e.observer.Event(ctx, EventOrderReused, existing.OrderNo(), nil)
 			return e.requestPayment(ctx, existing, true)
 		}
@@ -93,6 +112,13 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 			return nil, err
 		}
 		if hasCurrent {
+			// 抢跑路径：旧单已被网关确认支付，返回旧单让客户端跳详情页。
+			// 注意 current 的金额是**旧 product** 的——客户端 UI 应基于
+			// CreateResult.Reused=true 引导用户而非展示新 product 的支付页。
+			if unlock != nil {
+				unlock()
+				unlock = nil
+			}
 			return &CreateResult[O]{Order: current, Reused: true}, nil
 		}
 	}
@@ -131,7 +157,13 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 	})
 
 	if _, enqErr := e.delayQueue.Enqueue(ctx, orderNo, expireAt); enqErr != nil {
+		// rollback 路径：订单从未对业务侧可见（OnCreated 还未调用），
+		// 此处仅做内部清理，不触发任何业务钩子，避免事件序列不对称。
 		e.rollbackPendingOnEnqueueFail(ctx, order, expireAt)
+		if unlock != nil {
+			unlock()
+			unlock = nil
+		}
 		err = fmt.Errorf("orderflow: enqueue delay close: %w", enqErr)
 		return nil, err
 	}
@@ -143,13 +175,27 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 		)
 	}
 
+	// OnCreated 之前订单虽然已落库，但还未"对业务可见"。OnCreated 调用之后，
+	// 业务侧可能基于该事件做后续动作；因此 OnCreated 必须在 Enqueue 成功之后
+	// 调用——保证 OnCreated 一旦触发，对应的 OnClosed/OnPaid 必然有机会触发，
+	// 事件序列保持对称。
 	if e.onCreated != nil {
-		if hookErr := e.onCreated(ctx, order); hookErr != nil {
+		hookErr := e.safeHookE(ctx, "OnCreated", orderNo, func() error {
+			return e.onCreated(ctx, order)
+		})
+		if hookErr != nil {
 			e.logger.WarnContext(ctx, "orderflow: OnCreated hook returned error",
 				slog.String("order_no", orderNo),
 				slog.Any("error", hookErr),
 			)
 		}
+	}
+
+	// 网关下单**走锁外**：此刻 store.Create + Enqueue 已完成，"一用户一商品一 Pending"
+	// 不变量已通过 DB 与延时队列固化，不再需要锁串行化。
+	if unlock != nil {
+		unlock()
+		unlock = nil
 	}
 
 	result, err = e.requestPayment(ctx, order, false)
@@ -159,9 +205,13 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 // rollbackPendingOnEnqueueFail 在延时队列入队失败时，把刚落库的 Pending 订单自我保护式关闭。
 // 否则这单永远不会被关闭，占坑影响"一用户一商品一 Pending"的不变量。
 //
+// **不触发业务钩子的原因**：本路径在 OnCreated 调用之前发生——业务侧从未感知该订单
+// 存在，触发 OnClosed 会让事件总线/审计日志看到一个"凭空冒出来的关闭事件"。
+// 仅记录内部日志 + Observer 事件，让运维可观测但不污染业务事件流。
+//
 // 失败路径说明：如果 CAS 也失败（DB 短时不可用），此订单暂时成为"孤儿 Pending"——
 // 不在延时队列、状态仍是 Pending。兜底机制：`CloseFallback` 会扫描 DB 中过期 Pending
-// 并关掉它。为了让运维能对账 fallback 回收路径，这里把失败路径显式记日志。
+// 并关掉它（届时走标准 Close 路径触发 OnClosed，事件序列保持完整）。
 func (e *Engine[O]) rollbackPendingOnEnqueueFail(ctx context.Context, order O, expireAt time.Time) {
 	affected, err := e.store.CASClose(ctx, order.OrderNo())
 	if err != nil {
@@ -179,12 +229,10 @@ func (e *Engine[O]) rollbackPendingOnEnqueueFail(ctx context.Context, order O, e
 	}
 	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusClosed, expireAt)
 	e.appendLog(ctx, order, StatusPending, StatusClosed, "system", "closed: delay queue enqueue failed")
+	// Observer 事件保留（运维可见），但不调用 OnClosed 钩子。
 	e.observer.Event(ctx, EventOrderClosed, order.OrderNo(), map[string]any{
 		"reason": string(ClosedReasonEnqueueFail),
 	})
-	if e.onClosed != nil {
-		e.onClosed(ctx, order, ClosedReasonEnqueueFail)
-	}
 }
 
 // closeSuperseded 在用户发起新订单时关闭旧 Pending 单。
@@ -249,10 +297,14 @@ func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductI
 		"reason": string(ClosedReasonSuperseded),
 	})
 	if e.onSuperseded != nil {
-		e.onSuperseded(ctx, existing, newProductID)
+		e.safeHook(ctx, "OnSuperseded", existing.OrderNo(), func() {
+			e.onSuperseded(ctx, existing, newProductID)
+		})
 	}
 	if e.onClosed != nil {
-		e.onClosed(ctx, existing, ClosedReasonSuperseded)
+		e.safeHook(ctx, "OnClosed", existing.OrderNo(), func() {
+			e.onClosed(ctx, existing, ClosedReasonSuperseded)
+		})
 	}
 	return zero, false, nil
 }

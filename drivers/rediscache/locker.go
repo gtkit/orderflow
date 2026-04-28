@@ -24,9 +24,30 @@ var releaseLockScript = redis.NewScript(`
 	return 0
 `)
 
-// Locker 是 orderflow.Locker 的 Redis 实现。
-// 基于 SET NX EX + Lua CAS 释放，符合 "Redlock-lite" 模式（单 Redis 实例，适合非 HA 场景；
-// 多实例场景应考虑 redsync 或 Redis Sentinel 下的单 primary）。
+// Locker 是 orderflow.Locker 的 Redis 实现，基于 SET NX EX + Lua CAS 释放。
+//
+// # 适用场景
+//
+// 适合**单 Redis 主**或**单 Redis Sentinel cluster（仅写主）**场景。在这两种部署
+// 下锁的获取与释放都走同一节点，正确性与 SET NX EX 的语义一致。
+//
+// # ⚠ 主从切换不安全
+//
+// **本实现不适合主从异步复制下的故障切换场景**：
+//
+//  1. 客户端 A 在主节点上 SET NX EX 成功，但主在同步到从之前挂掉；
+//  2. Sentinel / Cluster 把从提升为新主——新主上锁不存在；
+//  3. 客户端 B SET NX EX 同 key 也成功；
+//  4. **同一逻辑锁被 A 和 B 同时持有**——`Engine.Create` 的串行化保证失效。
+//
+// 这是 Redis 单实例锁的固有限制，与"Redlock 算法"的多节点法定人数（quorum）方案不同。
+//
+// 生产建议（按业务可容忍程度选择）：
+//   - 业务能容忍极少数双 Pending → 配合 DB 部分唯一索引兜底，使用本 Locker；
+//   - 业务对一致性要求高 → 改用 [redsync](https://github.com/go-redsync/redsync)
+//     在多个独立 Redis 实例上跑 Redlock，再实现 orderflow.Locker 接口；
+//   - 单点 Redis 故障可接受 → 用 Sentinel + 只对 primary 写，主切换期间业务读写都中断，
+//     不会出现"双主双写"。
 type Locker struct {
 	rdb       *redis.Client
 	keyPrefix string

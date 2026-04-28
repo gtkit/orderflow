@@ -17,6 +17,9 @@ import (
 //  3. 若 Config.FinalizeExtra 非 nil，在同一 tx 内调用，用于业务侧的权益发放（VIP 激活、积分入账等）。
 //
 // FinalizeExtra 返回 error 会整体回滚——调用方可以借此保证"订单状态 + 账单 + 权益"的强一致。
+//
+// affected=0 时返回的错误会附带订单当前真实状态，便于运维区分"已 Delivered（重入）"
+// 与"被并发关闭（异常）"两种情形。
 func (s *Store[O, M]) FinalizePaidOrder(ctx context.Context, order O, bill orderflow.BillSpec) error {
 	now := time.Now()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -31,10 +34,38 @@ func (s *Store[O, M]) FinalizePaidOrder(ctx context.Context, order O, bill order
 			return fmt.Errorf("gormstore: finalize update order: %w", result.Error)
 		}
 		if result.RowsAffected == 0 {
-			return fmt.Errorf("gormstore: finalize: order %s not in paid state", order.OrderNo())
+			// 二次 SELECT 把当前状态读出来——错误信息里只说"not in paid state"
+			// 会让运维难以判断到底是已 Delivered（重入）还是被并发 Closed（异常）。
+			var currentStatus orderflow.OrderStatus
+			selErr := tx.Table(s.orderTable).
+				Select(s.cols.Status).
+				Where(s.cols.OrderNo+" = ?", order.OrderNo()).
+				Limit(1).
+				Scan(&currentStatus).Error
+			if selErr != nil {
+				return fmt.Errorf("gormstore: finalize: order %s not in paid state (recheck failed: %w)",
+					order.OrderNo(), selErr)
+			}
+			return fmt.Errorf("gormstore: finalize: order %s not in paid state (current=%s)",
+				order.OrderNo(), currentStatus.String())
 		}
 
 		billModel := buildBill(bill)
+		// 补写 channel_id：BillSpec.ChannelID 由调用方（Engine.finalizeDelivery）填零值，
+		// 因为 OrderSnapshot 接口未暴露 ChannelID()。这里在同一事务内回查订单表的
+		// channel_id 列补到 bill，让"按渠道对账"开箱可用。
+		// 仅当 BillSpec 未携带 ChannelID 时才回查（业务方通过自定义路径已经填值则保留）。
+		if billModel.ChannelID == 0 {
+			var channelID int64
+			if err := tx.Table(s.orderTable).
+				Select(s.cols.ChannelID).
+				Where(s.cols.OrderNo+" = ?", order.OrderNo()).
+				Limit(1).
+				Scan(&channelID).Error; err != nil {
+				return fmt.Errorf("gormstore: finalize lookup channel_id: %w", err)
+			}
+			billModel.ChannelID = channelID
+		}
 		if err := tx.Table(s.billTable).Create(billModel).Error; err != nil {
 			return fmt.Errorf("gormstore: finalize insert bill: %w", err)
 		}
