@@ -84,11 +84,11 @@ type OrderSnapshot interface {
     OrderNo() string            // 订单号（对外可见）
     OrderToken() string         // 不可预测 token，客户端轮询 / 订阅 key
     UserID() int64              // 订单归属用户
-    Status() OrderStatus        // 当前状态枚举
+    Status() OrderStatus        // 当前状态枚举（0/10/20/30/40/50）
     ProductID() uint64
-    ProductType() string
+    ProductType() ProductType   // typed enum：1=文本 / 2=视频 / 3=音频 / 99=会员
     ProductTitle() string
-    PayMethod() string          // 业务语义支付方式，如 "wechat_app"
+    PayMethod() PayMethod       // typed enum：1=微信 / 2=支付宝 / 3=银联
     PayAmount() int64           // 实付金额（分）
     OriginalPrice() int64       // 原价（分）
     TradeNo() string            // 支付网关流水号，空串表示未支付
@@ -336,12 +336,14 @@ engine, err := orderflow.New[*myorder.Order](orderflow.Config[*myorder.Order]{
     OnReopened:   func(ctx context.Context, o *myorder.Order, n orderflow.NotifyResult) { /* ... */ },
     OnSuperseded: func(ctx context.Context, old *myorder.Order, newProductID uint64) { /* ... */ },
 
-    ResolveChannel: func(payMethod string) orderflow.Channel {
+    ResolveChannel: func(payMethod orderflow.PayMethod) orderflow.Channel {
         switch payMethod {
-        case "wechat_app", "wechat_mp":
+        case orderflow.PayMethodWechat:
             return "wechat"
-        case "alipay":
+        case orderflow.PayMethodAlipay:
             return "alipay"
+        case orderflow.PayMethodUnion:
+            return "unionpay"
         }
         return ""
     },
@@ -486,12 +488,14 @@ func notifyHandler(engine *orderflow.Engine[*myorder.Order], gateway orderflow.P
 
 | 从 | 可到达 |
 |---|---|
-| `Pending` | `Paid` / `Closed` / `Cancelled` |
-| `Paid` | `Delivered` / `Closed`（异常，`CASReopenPaid` 反向恢复） |
-| `Delivered` | `Completed` |
-| `Completed` / `Closed` / `Cancelled` | 终态，不再跃迁 |
+| `Pending`（0） | `Paid` / `Closed` / `Cancelled` |
+| `Paid`（10） | `Delivered` / `Closed`（异常，`CASReopenPaid` 反向恢复） |
+| `Delivered`（20） | `Completed` |
+| `Completed`（30）/ `Closed`（40）/ `Cancelled`（50） | 终态，不再跃迁 |
 
-`OrderStatus.IsTerminal()` 对 `Completed` / `Closed` / `Cancelled` 返回 `true`。
+`OrderStatus.IsTerminal()` 对 `Completed` / `Closed` / `Cancelled` 三个状态返回 `true`。
+
+支付超时仍然走 `Pending -> Closed (reason=timeout)`，不区分独立的 Expired 状态。关闭原因通过 `ClosedReason` 枚举区分（`timeout` / `superseded` / `manual` / `enqueue_fail`）。
 
 ### 正常支付流程（时序图）
 
@@ -856,7 +860,7 @@ _ = engine.CloseByAdmin(ctx, orderNo, fmt.Sprintf("ticket:%d", ticketID))
 
 ```sql
 -- PostgreSQL
-CREATE UNIQUE INDEX uk_user_product_pending ON orders (user_id, product_id) WHERE status = 1;
+CREATE UNIQUE INDEX uk_user_product_pending ON orders (user_id, product_id) WHERE status = 0;
 -- MySQL: 用生成列 + 普通唯一索引模拟
 ```
 
@@ -876,14 +880,17 @@ cfg.OnPaid = rediscache.IdempotentOnPaidViaRedis(myOnPaid, rdb, "orderflow:onpai
 
 ### 5. 注入 `Config.ResolveChannel` + `Config.BuildNotifyURL`
 
-默认实现把 `PayMethod` 直接当 `Channel` + 用 `url.PathEscape` 拼路径。生产应注入定制实现：白名单校验 PayMethod + 拼完整域名的 NotifyURL：
+默认实现按 typed enum 内置映射 `Wechat -> "wechat"` / `Alipay -> "alipay"` / `Union -> "unionpay"`，未识别值返回空。生产环境如需自定义网关命名（如带 `_app` / `_h5` 后缀分流），应注入定制实现：
 
 ```go
-cfg.ResolveChannel = func(pm string) orderflow.Channel {
+cfg.ResolveChannel = func(pm orderflow.PayMethod) orderflow.Channel {
     switch pm {
-    case "wechat_app", "wechat_h5": return "wechat"
-    case "alipay_app", "alipay_h5": return "alipay"
-    default: panic("unknown pay method: " + pm) // 业务侧应在更早一步拒绝
+    case orderflow.PayMethodWechat: return "wechat_app"
+    case orderflow.PayMethodAlipay: return "alipay_app"
+    case orderflow.PayMethodUnion:  return "unionpay"
+    default:
+        // 业务侧应在 Engine.Create 之前拒绝未知支付方式
+        return ""
     }
 }
 cfg.BuildNotifyURL = func(ch orderflow.Channel) string {

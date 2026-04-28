@@ -135,7 +135,7 @@ func TestStream_CloseUnblocksForwardWhenBufferFull(t *testing.T) {
 	// 发送 events 缓冲大小（8）+ 额外几条，确保 forward 在内层 `events <-` 阻塞
 	go func() {
 		for range 12 {
-			server.Publish("orderflow:status:events:TOK-SLOW", "2")
+			server.Publish("orderflow:status:events:TOK-SLOW", "10")
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -191,7 +191,7 @@ func TestStream_IgnoresMalformedPayload(t *testing.T) {
 		// 发一条垃圾 + 一条合法
 		server.Publish("orderflow:status:events:TOK-M", "not-a-number")
 		time.Sleep(20 * time.Millisecond)
-		server.Publish("orderflow:status:events:TOK-M", "2") // StatusPaid
+		server.Publish("orderflow:status:events:TOK-M", "10") // StatusPaid
 	}()
 
 	select {

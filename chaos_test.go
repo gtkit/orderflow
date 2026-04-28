@@ -49,7 +49,7 @@ func TestChaos_ConcurrentHandleNotify_DifferentOrders(t *testing.T) {
 			productTitle:  "VIP",
 			originalPrice: 9900,
 			payAmount:     9900,
-			payMethod:     "wechat",
+			payMethod:     PayMethodWechat,
 			expireAt:      time.Now().Add(time.Hour),
 		})
 	}
@@ -144,7 +144,7 @@ func TestChaos_HandleNotifyCloseRace(t *testing.T) {
 			productTitle:  "VIP",
 			originalPrice: 9900,
 			payAmount:     9900,
-			payMethod:     "wechat",
+			payMethod:     PayMethodWechat,
 			expireAt:      time.Now().Add(-time.Minute), // 已过期
 		})
 
@@ -209,7 +209,7 @@ func TestChaos_DeliveryFallbackRescuesFailedOnPaid(t *testing.T) {
 		productTitle:  "VIP",
 		originalPrice: 9900,
 		payAmount:     9900,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(time.Hour),
 	})
 

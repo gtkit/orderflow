@@ -4,13 +4,25 @@
 
 ## [Unreleased]
 
+⚠ **破坏性变更**：对齐下游业务参考标准，重写 `OrderStatus` 数值布局、引入两类 typed enum。本变更暂不发版（仓库无外部下游使用），代码就绪后单独走发版流程。
+
 ### Added
+- 新增 typed enum：`orderflow.PayMethod`（int8，零值=未选择，`PayMethodWechat=1` / `PayMethodAlipay=2` / `PayMethodUnion=3`），含 `String()` 中文名称
+- 新增 typed enum：`orderflow.ProductType`（int8，零值=未指定，`ProductTypeText=1` / `Course=2` / `Column=3` / `Membership=99`），含 `String()` 中文名称
 
 ### Changed
-
-### Deprecated
+- ⚠ **`OrderStatus` 全部具名常量数值变更**：`Pending` 由 `1` 改为 `0`、`Paid` 由 `2` 改为 `10`、`Delivered` 由 `3` 改为 `20`、`Completed` 由 `4` 改为 `30`、`Closed` 由 `5` 改为 `40`、`Cancelled` 由 `6` 改为 `50`。零值即 `StatusPending`，与 GORM `default:0` 行为一致
+- ⚠ **`OrderSpec.PayMethod` 字段类型由 `string` 改为 `orderflow.PayMethod`**；`OrderSpec.ProductType` 同步由 `string` 改为 `orderflow.ProductType`
+- ⚠ **`OrderSnapshot.PayMethod()` 返回值由 `string` 改为 `orderflow.PayMethod`**；`OrderSnapshot.ProductType()` 同步改为 `orderflow.ProductType`
+- ⚠ **`BillSpec.PayMethod` / `BillSpec.ProductType`** 字段类型同步改为对应 typed enum
+- ⚠ **`CreateRequest.PayMethod` / `ProductInfo.Type`** 字段类型同步改为对应 typed enum
+- ⚠ **`ResolveChannelFunc` 签名由 `func(payMethod string) Channel` 改为 `func(payMethod orderflow.PayMethod) Channel`**；默认实现按 typed enum 内置映射 `Wechat -> "wechat"` / `Alipay -> "alipay"` / `Union -> "unionpay"`
+- ⚠ **`gormstore.OrderBill.PayMethod` / `ProductType`** 列类型由 `varchar(32)` 改为 `tinyint`，存 typed enum 数值
+- ⚠ `IsTerminal` 终态集合保持 `Completed` / `Closed` / `Cancelled` 三个状态（数值变更但语义不变）
 
 ### Removed
+- ⚠ **删除 `StatusUnknown` 常量**——零值现在是 `StatusPending` 而非 `Unknown`
+- 删除 `Engine.Create` 入参的 `maxCreateProductTypeLen` / `maxCreatePayMethodLen` 长度校验常量；typed enum 不再需要长度校验
 
 ### Fixed
 

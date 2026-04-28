@@ -114,13 +114,13 @@ func TestCreate_SupersedeWhenPayMethodDiffers(t *testing.T) {
 		productTitle:  req.Product.Title,
 		originalPrice: req.Product.Price,
 		payAmount:     req.Product.Price,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(time.Hour),
 	}
 	env.store.seed(existing)
 	env.dq.enqueued[existing.orderNo] = existing.expireAt // 模拟旧单在延时队列中
 
-	req.PayMethod = "alipay"
+	req.PayMethod = PayMethodAlipay
 	result, err := env.engine.Create(ctx, req)
 	mustNotErr(t, err, "Create")
 
@@ -172,7 +172,7 @@ func TestCreate_SupersedeRaceLostToPayment(t *testing.T) {
 		productID:     req.Product.ID,
 		originalPrice: req.Product.Price,
 		payAmount:     req.Product.Price,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(time.Hour),
 	}
 	env.store.seed(existing)
@@ -182,7 +182,7 @@ func TestCreate_SupersedeRaceLostToPayment(t *testing.T) {
 	// CASCloseLosesToPaidOnce 会让第一次 CASClose 返回 0 并同时把 order 改成 Paid。
 	env.store.CASCloseLosesToPaidOnce = true
 
-	req.PayMethod = "alipay"
+	req.PayMethod = PayMethodAlipay
 	result, err := env.engine.Create(ctx, req)
 	mustNotErr(t, err, "Create")
 
@@ -244,13 +244,7 @@ func TestCreate_RejectsInvalidInput(t *testing.T) {
 		{"Product.Title too long", func(r *CreateRequest) {
 			r.Product.Title = stringOfLen(maxCreateProductTitleLen + 1)
 		}},
-		{"Product.Type too long", func(r *CreateRequest) {
-			r.Product.Type = stringOfLen(maxCreateProductTypeLen + 1)
-		}},
-		{"PayMethod empty", func(r *CreateRequest) { r.PayMethod = "" }},
-		{"PayMethod too long", func(r *CreateRequest) {
-			r.PayMethod = stringOfLen(maxCreatePayMethodLen + 1)
-		}},
+		{"PayMethod zero", func(r *CreateRequest) { r.PayMethod = 0 }},
 		{"ClientIP not a valid IP", func(r *CreateRequest) { r.ClientIP = "not-an-ip" }},
 		{"ClientIP with CRLF injection", func(r *CreateRequest) {
 			r.ClientIP = "127.0.0.1\r\nfake log entry"
@@ -294,7 +288,7 @@ func seedSupersedeOldOrder(t *testing.T, env *testEnv, req CreateRequest) *testO
 		productTitle:  req.Product.Title,
 		originalPrice: req.Product.Price,
 		payAmount:     req.Product.Price,
-		payMethod:     "wechat", // 与 standardRequest 默认不同
+		payMethod:     PayMethodWechat, // 与 standardRequest 默认不同
 		expireAt:      time.Now().Add(time.Hour),
 	}
 	env.store.seed(old)
@@ -311,7 +305,7 @@ func TestCreate_SupersedeStrict_GatewayCloseFailureBlocks(t *testing.T) {
 
 	// 默认 policy 是 SupersededStrict（零值），不显式设置
 	req := standardRequest()
-	req.PayMethod = "alipay" // 触发 superseded（旧单是 wechat）
+	req.PayMethod = PayMethodAlipay // 触发 superseded（旧单是 wechat）
 	old := seedSupersedeOldOrder(t, env, req)
 
 	// 网关 CloseOrder 注入持久错误
@@ -340,7 +334,7 @@ func TestCreate_SupersedeDegraded_GatewayCloseFailureContinues(t *testing.T) {
 	ctx := context.Background()
 
 	req := standardRequest()
-	req.PayMethod = "alipay"
+	req.PayMethod = PayMethodAlipay
 	old := seedSupersedeOldOrder(t, env, req)
 
 	env.gw.CloseOrderErr = errors.New("gateway 5xx")

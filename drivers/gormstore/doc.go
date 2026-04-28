@@ -5,7 +5,11 @@
 //   - 用户带自己的 Order GORM 模型 M，通过 Wrap / BuildModel 两个适配函数注入；
 //   - gormstore 自带 OrderBill / OrderLog 两个标准模型，用户只需指定表名；
 //   - 订单表的列名通过 ColumnMap 定制，默认值贴合主流命名（order_no / status / trade_no ...）；
-//   - 状态列默认存 orderflow.OrderStatus 的规范整数值（1..6）。业务已有其它编码时需要做一次数据迁移。
+//   - 状态列默认存 orderflow.OrderStatus 的规范整数值
+//     （0=Pending / 10=Paid / 20=Delivered / 30=Completed / 40=Closed / 50=Cancelled）；
+//     业务已有其它编码时需要做一次数据迁移。
+//   - 支付方式列与商品类型列默认存 typed enum 数值（tinyint）：
+//     PayMethod (1=微信 / 2=支付宝 / 3=银联)；ProductType (1=文本 / 2=视频 / 3=音频 / 99=会员)。
 //
 // # 必备索引清单
 //
@@ -22,7 +26,7 @@
 //	-- 复用查询路径
 //	INDEX idx_user_product_status ON orders (user_id, product_id, status);  -- FindPendingByUserAndProduct
 //	-- 强烈建议加部分唯一索引（PostgreSQL）作为"一用户一商品一 Pending"兜底：
-//	-- CREATE UNIQUE INDEX uk_user_product_pending ON orders (user_id, product_id) WHERE status = 1;
+//	-- CREATE UNIQUE INDEX uk_user_product_pending ON orders (user_id, product_id) WHERE status = 0;
 //	-- MySQL 可用生成列 + 普通唯一索引模拟。
 //
 //	-- 用户列表

@@ -9,21 +9,21 @@ import (
 // OrderBill 是 gormstore 内置的账单模型。
 // 用户通过 Config.BillTable 指定表名；列定义按主流命名约定给出，必要时业务侧可建对应表结构。
 type OrderBill struct {
-	ID             uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	UserID         int64     `gorm:"column:user_id;not null;index"`
-	OrderNo        string    `gorm:"column:order_no;type:varchar(64);not null;uniqueIndex"`
-	TradeNo        string    `gorm:"column:trade_no;type:varchar(128);not null;default:''"`
-	ProductID      uint64    `gorm:"column:product_id;not null"`
-	ProductType    string    `gorm:"column:product_type;type:varchar(32);not null;default:''"`
-	ProductTitle   string    `gorm:"column:product_title;type:varchar(255);not null"`
-	OriginalPrice  int64     `gorm:"column:original_price;not null"`
-	DiscountAmount int64     `gorm:"column:discount_amount;not null;default:0"`
-	PayAmount      int64     `gorm:"column:pay_amount;not null"`
-	PayMethod      string    `gorm:"column:pay_method;type:varchar(32);not null;default:''"`
-	PayChannel     string    `gorm:"column:pay_channel;type:varchar(32);not null;default:''"`
-	ChannelID      int64     `gorm:"column:channel_id;not null;default:0"`
-	PaidAt         time.Time `gorm:"column:paid_at;type:datetime;not null"`
-	CreatedAt      time.Time `gorm:"column:created_at;not null"`
+	ID             uint64                `gorm:"column:id;primaryKey;autoIncrement"`
+	UserID         int64                 `gorm:"column:user_id;not null;index"`
+	OrderNo        string                `gorm:"column:order_no;type:varchar(64);not null;uniqueIndex"`
+	TradeNo        string                `gorm:"column:trade_no;type:varchar(128);not null;default:''"`
+	ProductID      uint64                `gorm:"column:product_id;not null"`
+	ProductType    orderflow.ProductType `gorm:"column:product_type;type:tinyint;not null;default:0"`
+	ProductTitle   string                `gorm:"column:product_title;type:varchar(255);not null"`
+	OriginalPrice  int64                 `gorm:"column:original_price;not null"`
+	DiscountAmount int64                 `gorm:"column:discount_amount;not null;default:0"`
+	PayAmount      int64                 `gorm:"column:pay_amount;not null"`
+	PayMethod      orderflow.PayMethod   `gorm:"column:pay_method;type:tinyint;not null;default:0"`
+	PayChannel     string                `gorm:"column:pay_channel;type:varchar(32);not null;default:''"`
+	ChannelID      int64                 `gorm:"column:channel_id;not null;default:0"`
+	PaidAt         time.Time             `gorm:"column:paid_at;type:datetime;not null"`
+	CreatedAt      time.Time             `gorm:"column:created_at;not null"`
 }
 
 // OrderLog 是 gormstore 内置的状态流水模型。

@@ -159,8 +159,8 @@ func TestCache_TTLUnknownStatusFallsBack(t *testing.T) {
 	c, server, _ := newTestCache(t)
 	ctx := context.Background()
 
-	// StatusUnknown 不在默认 TTL map，应该用 FallbackTTL
-	_ = c.Set(ctx, "TOK-UNK", 1001, orderflow.OrderStatus(99), time.Time{})
+	// 未知数值不在默认 TTL map，应该用 FallbackTTL
+	_ = c.Set(ctx, "TOK-UNK", 1001, orderflow.OrderStatus(127), time.Time{})
 	ttl := server.TTL(c.key("TOK-UNK"))
 	if ttl != 2*time.Minute {
 		t.Errorf("unknown-status TTL = %s, want 2m", ttl)

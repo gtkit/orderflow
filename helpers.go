@@ -160,12 +160,22 @@ func (e *Engine[O]) recordAnomaly(ctx context.Context, order O, kind AnomalyKind
 }
 
 // resolveChannelOf 将业务语义的支付方式映射为网关渠道。
-// 未配置钩子时直接将 payMethod 当作 Channel（适用于 "wechat" / "alipay" 这类一致命名）。
-func (e *Engine[O]) resolveChannelOf(payMethod string) Channel {
+// 未配置钩子时按 typed enum 内置映射：Wechat -> "wechat" / Alipay -> "alipay" / Union -> "unionpay"，
+// 其他值返回空字符串 Channel（业务方应注入 ResolveChannel 钩子做自定义映射）。
+func (e *Engine[O]) resolveChannelOf(payMethod PayMethod) Channel {
 	if e.resolveChannel != nil {
 		return e.resolveChannel(payMethod)
 	}
-	return Channel(payMethod)
+	switch payMethod {
+	case PayMethodWechat:
+		return Channel("wechat")
+	case PayMethodAlipay:
+		return Channel("alipay")
+	case PayMethodUnion:
+		return Channel("unionpay")
+	default:
+		return Channel("")
+	}
 }
 
 // buildNotifyURLOf 构造支付回调 URL。

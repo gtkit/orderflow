@@ -24,7 +24,7 @@ func TestHook_OnPaidPanicDoesNotCrashHandleNotify(t *testing.T) {
 		productTitle:  "VIP",
 		originalPrice: 9900,
 		payAmount:     9900,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(time.Hour),
 	})
 
@@ -65,7 +65,7 @@ func TestHook_OnClosedPanicDoesNotCrashClose(t *testing.T) {
 		orderNo:    "PNC-2",
 		orderToken: "T-PNC2",
 		status:     StatusPending,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 		expireAt:   time.Now().Add(-time.Minute),
 	})
 
@@ -90,7 +90,7 @@ func TestHook_OnAnomalyPanicDoesNotCrashHandleNotify(t *testing.T) {
 		status:     StatusPending,
 		productID:  2001,
 		payAmount:  9900,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 		expireAt:   time.Now().Add(time.Hour),
 	})
 

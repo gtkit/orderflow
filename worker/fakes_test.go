@@ -21,25 +21,25 @@ type testOrder struct {
 	orderToken string
 	userID     int64
 	status     orderflow.OrderStatus
-	payMethod  string
+	payMethod  orderflow.PayMethod
 	payAmount  int64
 	tradeNo    string
 	expireAt   time.Time
 	paidAt     *time.Time
 }
 
-func (o *testOrder) OrderNo() string               { return o.orderNo }
-func (o *testOrder) OrderToken() string            { return o.orderToken }
-func (o *testOrder) UserID() int64                 { return o.userID }
-func (o *testOrder) Status() orderflow.OrderStatus { return o.status }
-func (o *testOrder) ProductID() uint64             { return 1 }
-func (o *testOrder) ProductType() string           { return "" }
-func (o *testOrder) ProductTitle() string          { return "T" }
-func (o *testOrder) PayMethod() string             { return o.payMethod }
-func (o *testOrder) PayAmount() int64              { return o.payAmount }
-func (o *testOrder) OriginalPrice() int64          { return o.payAmount }
-func (o *testOrder) TradeNo() string               { return o.tradeNo }
-func (o *testOrder) ExpireAt() time.Time           { return o.expireAt }
+func (o *testOrder) OrderNo() string                    { return o.orderNo }
+func (o *testOrder) OrderToken() string                 { return o.orderToken }
+func (o *testOrder) UserID() int64                      { return o.userID }
+func (o *testOrder) Status() orderflow.OrderStatus      { return o.status }
+func (o *testOrder) ProductID() uint64                  { return 1 }
+func (o *testOrder) ProductType() orderflow.ProductType { return 0 }
+func (o *testOrder) ProductTitle() string               { return "T" }
+func (o *testOrder) PayMethod() orderflow.PayMethod     { return o.payMethod }
+func (o *testOrder) PayAmount() int64                   { return o.payAmount }
+func (o *testOrder) OriginalPrice() int64               { return o.payAmount }
+func (o *testOrder) TradeNo() string                    { return o.tradeNo }
+func (o *testOrder) ExpireAt() time.Time                { return o.expireAt }
 func (o *testOrder) PaidAt() (time.Time, bool) {
 	if o.paidAt == nil {
 		return time.Time{}, false

@@ -22,9 +22,9 @@ type OrderSnapshot interface {
 	UserID() int64
 	Status() OrderStatus
 	ProductID() uint64
-	ProductType() string
+	ProductType() ProductType
 	ProductTitle() string
-	PayMethod() string
+	PayMethod() PayMethod
 	PayAmount() int64
 	OriginalPrice() int64
 	TradeNo() string

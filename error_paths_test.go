@@ -237,7 +237,7 @@ func TestErrPath_Close_CASError(t *testing.T) {
 		orderNo:    "NO-CE",
 		orderToken: "T-CE",
 		status:     StatusPending,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 		expireAt:   time.Now().Add(-time.Minute),
 	})
 	env.store.ErrOnCAS = errCASDown
@@ -300,7 +300,7 @@ func TestErrPath_PublishStatus_CacheSetFailsThenDelete(t *testing.T) {
 		productTitle:  "VIP",
 		originalPrice: 9900,
 		payAmount:     9900,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(time.Hour),
 	})
 	env.cache.ErrOnSet = errCacheDown

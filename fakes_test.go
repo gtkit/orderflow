@@ -23,9 +23,9 @@ type testOrder struct {
 	userID        int64
 	status        OrderStatus
 	productID     uint64
-	productType   string
+	productType   ProductType
 	productTitle  string
-	payMethod     string
+	payMethod     PayMethod
 	payAmount     int64
 	originalPrice int64
 	tradeNo       string
@@ -35,18 +35,18 @@ type testOrder struct {
 	extra         map[string]any
 }
 
-func (o *testOrder) OrderNo() string      { return o.orderNo }
-func (o *testOrder) OrderToken() string   { return o.orderToken }
-func (o *testOrder) UserID() int64        { return o.userID }
-func (o *testOrder) Status() OrderStatus  { return o.status }
-func (o *testOrder) ProductID() uint64    { return o.productID }
-func (o *testOrder) ProductType() string  { return o.productType }
-func (o *testOrder) ProductTitle() string { return o.productTitle }
-func (o *testOrder) PayMethod() string    { return o.payMethod }
-func (o *testOrder) PayAmount() int64     { return o.payAmount }
-func (o *testOrder) OriginalPrice() int64 { return o.originalPrice }
-func (o *testOrder) TradeNo() string      { return o.tradeNo }
-func (o *testOrder) ExpireAt() time.Time  { return o.expireAt }
+func (o *testOrder) OrderNo() string          { return o.orderNo }
+func (o *testOrder) OrderToken() string       { return o.orderToken }
+func (o *testOrder) UserID() int64            { return o.userID }
+func (o *testOrder) Status() OrderStatus      { return o.status }
+func (o *testOrder) ProductID() uint64        { return o.productID }
+func (o *testOrder) ProductType() ProductType { return o.productType }
+func (o *testOrder) ProductTitle() string     { return o.productTitle }
+func (o *testOrder) PayMethod() PayMethod     { return o.payMethod }
+func (o *testOrder) PayAmount() int64         { return o.payAmount }
+func (o *testOrder) OriginalPrice() int64     { return o.originalPrice }
+func (o *testOrder) TradeNo() string          { return o.tradeNo }
+func (o *testOrder) ExpireAt() time.Time      { return o.expireAt }
 func (o *testOrder) PaidAt() (time.Time, bool) {
 	if o.paidAt == nil {
 		return time.Time{}, false
@@ -95,8 +95,8 @@ type fakeStore struct {
 
 	// Race injection：CASConfirmPaid 第一次返回 0 并把订单状态改为指定值。
 	// 比 ConfirmPaidRaceOnce 更灵活——可以测试 recheck 看到 Closed / Delivered / Cancelled
-	// 等不同分支。零值（StatusUnknown）不启用。
-	ConfirmPaidRaceToStatus OrderStatus
+	// 等不同分支。nil 表示不启用（零值=Pending 是合法状态，不能再当 sentinel）。
+	ConfirmPaidRaceToStatus *OrderStatus
 
 	// Race injection：CASConfirmPaid 第一次返回 0 并从 byNo 删除订单，
 	// 模拟"订单在 CAS 期间被并发操作清理"（虽然 engine 不会这么做，但作为防御性测试）。
@@ -290,9 +290,9 @@ func (s *fakeStore) CASConfirmPaid(_ context.Context, orderNo, tradeNo string, p
 		}
 		return 0, nil
 	}
-	if s.ConfirmPaidRaceToStatus != 0 {
-		target := s.ConfirmPaidRaceToStatus
-		s.ConfirmPaidRaceToStatus = 0
+	if s.ConfirmPaidRaceToStatus != nil {
+		target := *s.ConfirmPaidRaceToStatus
+		s.ConfirmPaidRaceToStatus = nil
 		if o, ok := s.byNo[orderNo]; ok {
 			o.status = target
 		}
@@ -765,12 +765,12 @@ func newTestEnv(t testing.TB) *testEnv {
 func standardRequest() CreateRequest {
 	return CreateRequest{
 		UserID:    1001,
-		PayMethod: "wechat",
+		PayMethod: PayMethodWechat,
 		ChannelID: 1,
 		ClientIP:  "127.0.0.1",
 		Product: ProductInfo{
 			ID:    2001,
-			Type:  "membership",
+			Type:  ProductTypeMembership,
 			Title: "VIP 年卡",
 			Price: 9900,
 			Extra: map[string]any{"vip_type": int8(2), "vip_days": int64(365)},
@@ -808,4 +808,3 @@ func mustLen[T any](t *testing.T, got []T, want int, msg string) {
 		t.Fatalf("%s: len=%d, want %d (got=%v)", msg, len(got), want, got)
 	}
 }
-

@@ -55,7 +55,7 @@ func TestCloseWorker_StatsRecordsBatchSize(t *testing.T) {
 		rig.store.seed(&testOrder{
 			orderNo: n, orderToken: "t-" + n,
 			status:    orderflow.StatusPending,
-			payMethod: "wechat",
+			payMethod: orderflow.PayMethodWechat,
 			expireAt:  now.Add(-time.Minute),
 		})
 		_, _ = rig.queue.Enqueue(ctx, n, now.Add(-time.Minute))

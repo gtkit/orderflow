@@ -21,7 +21,7 @@ func TestCloseFallback_ScanClosesAllExpiredPending(t *testing.T) {
 			orderNo:    n,
 			orderToken: "t-" + n,
 			status:     orderflow.StatusPending,
-			payMethod:  "wechat",
+			payMethod:  orderflow.PayMethodWechat,
 			expireAt:   now.Add(-time.Hour),
 		})
 		// 注意：不入延时队列，模拟 Redis 数据丢失
@@ -31,7 +31,7 @@ func TestCloseFallback_ScanClosesAllExpiredPending(t *testing.T) {
 		orderNo:    "FUTURE",
 		orderToken: "tf",
 		status:     orderflow.StatusPending,
-		payMethod:  "wechat",
+		payMethod:  orderflow.PayMethodWechat,
 		expireAt:   now.Add(time.Hour),
 	})
 

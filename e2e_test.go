@@ -295,7 +295,7 @@ func TestE2E_CloseThenPaidRecovery(t *testing.T) {
 		productTitle:  "VIP",
 		originalPrice: 9900,
 		payAmount:     9900,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(-time.Hour),
 	})
 

@@ -201,20 +201,20 @@ func TestLocker_NilClientReturnsError(t *testing.T) {
 
 type idempOrder struct{ orderNo string }
 
-func (o *idempOrder) OrderNo() string               { return o.orderNo }
-func (o *idempOrder) OrderToken() string            { return "" }
-func (o *idempOrder) UserID() int64                 { return 0 }
-func (o *idempOrder) Status() orderflow.OrderStatus { return orderflow.StatusPaid }
-func (o *idempOrder) ProductID() uint64             { return 0 }
-func (o *idempOrder) ProductType() string           { return "" }
-func (o *idempOrder) ProductTitle() string          { return "" }
-func (o *idempOrder) PayMethod() string             { return "" }
-func (o *idempOrder) PayAmount() int64              { return 0 }
-func (o *idempOrder) OriginalPrice() int64          { return 0 }
-func (o *idempOrder) TradeNo() string               { return "" }
-func (o *idempOrder) ExpireAt() time.Time           { return time.Time{} }
-func (o *idempOrder) PaidAt() (time.Time, bool)     { return time.Time{}, false }
-func (o *idempOrder) Extra() map[string]any         { return nil }
+func (o *idempOrder) OrderNo() string                    { return o.orderNo }
+func (o *idempOrder) OrderToken() string                 { return "" }
+func (o *idempOrder) UserID() int64                      { return 0 }
+func (o *idempOrder) Status() orderflow.OrderStatus      { return orderflow.StatusPaid }
+func (o *idempOrder) ProductID() uint64                  { return 0 }
+func (o *idempOrder) ProductType() orderflow.ProductType { return 0 }
+func (o *idempOrder) ProductTitle() string               { return "" }
+func (o *idempOrder) PayMethod() orderflow.PayMethod     { return 0 }
+func (o *idempOrder) PayAmount() int64                   { return 0 }
+func (o *idempOrder) OriginalPrice() int64               { return 0 }
+func (o *idempOrder) TradeNo() string                    { return "" }
+func (o *idempOrder) ExpireAt() time.Time                { return time.Time{} }
+func (o *idempOrder) PaidAt() (time.Time, bool)          { return time.Time{}, false }
+func (o *idempOrder) Extra() map[string]any              { return nil }
 
 func TestIdempotentOnPaidViaRedis_FirstCallReachesInner(t *testing.T) {
 	server := miniredis.RunT(t)

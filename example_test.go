@@ -109,11 +109,11 @@ func ExampleEngine_Create() {
 
 	result, err := engine.Create(ctx, orderflow.CreateRequest{
 		UserID:    1001, // 必须来自鉴权上下文
-		PayMethod: "wechat_app",
+		PayMethod: orderflow.PayMethodWechat,
 		ClientIP:  "203.0.113.10",
 		Product: orderflow.ProductInfo{
 			ID:    42,
-			Type:  "vip",
+			Type:  orderflow.ProductTypeMembership,
 			Title: "VIP 月卡",
 			Price: 9900, // 单位：分
 		},
@@ -219,17 +219,17 @@ func ExampleEngine_Close() {
 // 真实业务中应由你的 Order 模型实现（字段名、表结构自由）。
 type orderSnapshot struct{}
 
-func (*orderSnapshot) OrderNo() string               { return "" }
-func (*orderSnapshot) OrderToken() string            { return "" }
-func (*orderSnapshot) UserID() int64                 { return 0 }
-func (*orderSnapshot) Status() orderflow.OrderStatus { return orderflow.StatusUnknown }
-func (*orderSnapshot) ProductID() uint64             { return 0 }
-func (*orderSnapshot) ProductType() string           { return "" }
-func (*orderSnapshot) ProductTitle() string          { return "" }
-func (*orderSnapshot) PayMethod() string             { return "" }
-func (*orderSnapshot) PayAmount() int64              { return 0 }
-func (*orderSnapshot) OriginalPrice() int64          { return 0 }
-func (*orderSnapshot) TradeNo() string               { return "" }
-func (*orderSnapshot) ExpireAt() time.Time           { return time.Time{} }
-func (*orderSnapshot) PaidAt() (time.Time, bool)     { return time.Time{}, false }
-func (*orderSnapshot) Extra() map[string]any         { return nil }
+func (*orderSnapshot) OrderNo() string                    { return "" }
+func (*orderSnapshot) OrderToken() string                 { return "" }
+func (*orderSnapshot) UserID() int64                      { return 0 }
+func (*orderSnapshot) Status() orderflow.OrderStatus      { return orderflow.StatusPending }
+func (*orderSnapshot) ProductID() uint64                  { return 0 }
+func (*orderSnapshot) ProductType() orderflow.ProductType { return 0 }
+func (*orderSnapshot) ProductTitle() string               { return "" }
+func (*orderSnapshot) PayMethod() orderflow.PayMethod     { return 0 }
+func (*orderSnapshot) PayAmount() int64                   { return 0 }
+func (*orderSnapshot) OriginalPrice() int64               { return 0 }
+func (*orderSnapshot) TradeNo() string                    { return "" }
+func (*orderSnapshot) ExpireAt() time.Time                { return time.Time{} }
+func (*orderSnapshot) PaidAt() (time.Time, bool)          { return time.Time{}, false }
+func (*orderSnapshot) Extra() map[string]any              { return nil }

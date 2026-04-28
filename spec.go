@@ -10,12 +10,12 @@ type OrderSpec struct {
 	UserID        int64
 	Status        OrderStatus
 	ProductID     uint64
-	ProductType   string
+	ProductType   ProductType
 	ProductTitle  string
 	OriginalPrice int64
 	DiscountPrice int64
 	PayAmount     int64
-	PayMethod     string
+	PayMethod     PayMethod
 	// ChannelID 业务自定义的渠道维度，由 CreateRequest.ChannelID 透传。
 	// Engine 不解读；driver 负责持久化（零值 = 不指定渠道）。
 	ChannelID int64
@@ -30,7 +30,7 @@ type OrderSpec struct {
 // Engine 不关心商品来源，只读取其中的价格、标题等做比价和快照。
 type ProductInfo struct {
 	ID    uint64
-	Type  string
+	Type  ProductType
 	Title string
 	// Price 单位：分（或业务方统一使用的最小货币单位）。
 	Price int64
@@ -51,12 +51,12 @@ type BillSpec struct {
 	OrderNo        string
 	TradeNo        string
 	ProductID      uint64
-	ProductType    string
+	ProductType    ProductType
 	ProductTitle   string
 	OriginalPrice  int64
 	DiscountAmount int64
 	PayAmount      int64
-	PayMethod      string
+	PayMethod      PayMethod
 	PayChannel     string
 	ChannelID      int64
 	PaidAt         time.Time

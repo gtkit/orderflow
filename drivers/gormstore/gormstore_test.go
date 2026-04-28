@@ -27,9 +27,9 @@ type orderRow struct {
 	UserIDCol        int64                 `gorm:"column:user_id;not null;index"`
 	StatusCol        orderflow.OrderStatus `gorm:"column:status;not null"`
 	ProductIDCol     uint64                `gorm:"column:product_id;not null"`
-	ProductTypeCol   string                `gorm:"column:product_type;size:32;not null;default:''"`
+	ProductTypeCol   orderflow.ProductType `gorm:"column:product_type;not null;default:0"`
 	ProductTitleCol  string                `gorm:"column:product_title;size:255;not null"`
-	PayMethodCol     string                `gorm:"column:pay_method;size:32;not null;default:''"`
+	PayMethodCol     orderflow.PayMethod   `gorm:"column:pay_method;not null;default:0"`
 	PayAmountCol     int64                 `gorm:"column:pay_amount;not null"`
 	OriginalPriceCol int64                 `gorm:"column:original_price;not null"`
 	TradeNoCol       string                `gorm:"column:trade_no;size:128;not null;default:''"`
@@ -42,18 +42,18 @@ type orderRow struct {
 
 func (orderRow) TableName() string { return "orders_test" }
 
-func (o *orderRow) OrderNo() string               { return o.OrderNoCol }
-func (o *orderRow) OrderToken() string            { return o.OrderTokenCol }
-func (o *orderRow) UserID() int64                 { return o.UserIDCol }
-func (o *orderRow) Status() orderflow.OrderStatus { return o.StatusCol }
-func (o *orderRow) ProductID() uint64             { return o.ProductIDCol }
-func (o *orderRow) ProductType() string           { return o.ProductTypeCol }
-func (o *orderRow) ProductTitle() string          { return o.ProductTitleCol }
-func (o *orderRow) PayMethod() string             { return o.PayMethodCol }
-func (o *orderRow) PayAmount() int64              { return o.PayAmountCol }
-func (o *orderRow) OriginalPrice() int64          { return o.OriginalPriceCol }
-func (o *orderRow) TradeNo() string               { return o.TradeNoCol }
-func (o *orderRow) ExpireAt() time.Time           { return o.ExpireAtCol }
+func (o *orderRow) OrderNo() string                    { return o.OrderNoCol }
+func (o *orderRow) OrderToken() string                 { return o.OrderTokenCol }
+func (o *orderRow) UserID() int64                      { return o.UserIDCol }
+func (o *orderRow) Status() orderflow.OrderStatus      { return o.StatusCol }
+func (o *orderRow) ProductID() uint64                  { return o.ProductIDCol }
+func (o *orderRow) ProductType() orderflow.ProductType { return o.ProductTypeCol }
+func (o *orderRow) ProductTitle() string               { return o.ProductTitleCol }
+func (o *orderRow) PayMethod() orderflow.PayMethod     { return o.PayMethodCol }
+func (o *orderRow) PayAmount() int64                   { return o.PayAmountCol }
+func (o *orderRow) OriginalPrice() int64               { return o.OriginalPriceCol }
+func (o *orderRow) TradeNo() string                    { return o.TradeNoCol }
+func (o *orderRow) ExpireAt() time.Time                { return o.ExpireAtCol }
 func (o *orderRow) PaidAt() (time.Time, bool) {
 	if o.PaidAtCol == nil {
 		return time.Time{}, false
@@ -239,7 +239,7 @@ func TestStore_CreateAndGetByNo(t *testing.T) {
 		ProductTitle:  "VIP",
 		PayAmount:     9900,
 		OriginalPrice: 9900,
-		PayMethod:     "wechat",
+		PayMethod:     orderflow.PayMethodWechat,
 		ExpireAt:      time.Now().Add(30 * time.Minute),
 	}
 	created, err := s.Create(ctx, spec)
@@ -798,18 +798,18 @@ type altOrderRow struct {
 
 func (altOrderRow) TableName() string { return "alt_orders" }
 
-func (o *altOrderRow) OrderNo() string               { return o.OrderCode }
-func (o *altOrderRow) OrderToken() string            { return o.Tok }
-func (o *altOrderRow) UserID() int64                 { return o.UserRef }
-func (o *altOrderRow) Status() orderflow.OrderStatus { return o.StateCode }
-func (o *altOrderRow) ProductID() uint64             { return o.Prod }
-func (o *altOrderRow) ProductType() string           { return "" }
-func (o *altOrderRow) ProductTitle() string          { return "" }
-func (o *altOrderRow) PayMethod() string             { return "" }
-func (o *altOrderRow) PayAmount() int64              { return o.Amt }
-func (o *altOrderRow) OriginalPrice() int64          { return o.OriAmt }
-func (o *altOrderRow) TradeNo() string               { return o.Txn }
-func (o *altOrderRow) ExpireAt() time.Time           { return o.Exp }
+func (o *altOrderRow) OrderNo() string                    { return o.OrderCode }
+func (o *altOrderRow) OrderToken() string                 { return o.Tok }
+func (o *altOrderRow) UserID() int64                      { return o.UserRef }
+func (o *altOrderRow) Status() orderflow.OrderStatus      { return o.StateCode }
+func (o *altOrderRow) ProductID() uint64                  { return o.Prod }
+func (o *altOrderRow) ProductType() orderflow.ProductType { return 0 }
+func (o *altOrderRow) ProductTitle() string               { return "" }
+func (o *altOrderRow) PayMethod() orderflow.PayMethod     { return 0 }
+func (o *altOrderRow) PayAmount() int64                   { return o.Amt }
+func (o *altOrderRow) OriginalPrice() int64               { return o.OriAmt }
+func (o *altOrderRow) TradeNo() string                    { return o.Txn }
+func (o *altOrderRow) ExpireAt() time.Time                { return o.Exp }
 func (o *altOrderRow) PaidAt() (time.Time, bool) {
 	if o.PaidTs == nil {
 		return time.Time{}, false

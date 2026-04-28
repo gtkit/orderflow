@@ -76,8 +76,8 @@ type OnSupersededHook[O OrderSnapshot] func(ctx context.Context, old O, newProdu
 // OnAnomalyHook 检测到业务异常时触发（金额不一致、状态机例外等）。
 type OnAnomalyHook[O OrderSnapshot] func(ctx context.Context, order O, kind AnomalyKind, detail string)
 
-// ResolveChannelFunc 将业务语义的支付方式（如 "wechat_app" / "alipay"）映射为网关渠道。
-type ResolveChannelFunc func(payMethod string) Channel
+// ResolveChannelFunc 将业务语义的支付方式（PayMethod typed enum）映射为网关渠道。
+type ResolveChannelFunc func(payMethod PayMethod) Channel
 
 // BuildNotifyURLFunc 根据渠道拼接支付回调 URL（允许带域名前缀 / 路径模板）。
 type BuildNotifyURLFunc func(ch Channel) string

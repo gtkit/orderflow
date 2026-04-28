@@ -122,7 +122,7 @@ func seedBenchPendingOrder(env *testEnv, orderNo string) *testOrder {
 		productTitle:  "VIP",
 		originalPrice: 9900,
 		payAmount:     9900,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(time.Hour),
 	}
 	env.store.seed(o)

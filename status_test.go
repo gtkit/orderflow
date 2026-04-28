@@ -7,14 +7,14 @@ func TestOrderStatus_String(t *testing.T) {
 		s    OrderStatus
 		want string
 	}{
-		{StatusUnknown, "unknown"},
 		{StatusPending, "pending"},
 		{StatusPaid, "paid"},
 		{StatusDelivered, "delivered"},
 		{StatusCompleted, "completed"},
 		{StatusClosed, "closed"},
 		{StatusCancelled, "cancelled"},
-		{OrderStatus(99), "unknown"},
+		{OrderStatus(127), "unknown"},
+		{OrderStatus(-1), "unknown"},
 	}
 	for _, c := range cases {
 		if got := c.s.String(); got != c.want {
@@ -23,9 +23,43 @@ func TestOrderStatus_String(t *testing.T) {
 	}
 }
 
+func TestOrderStatus_NumericValues(t *testing.T) {
+	want := map[OrderStatus]int8{
+		StatusPending:   0,
+		StatusPaid:      10,
+		StatusDelivered: 20,
+		StatusCompleted: 30,
+		StatusClosed:    40,
+		StatusCancelled: 50,
+	}
+	for s, n := range want {
+		if int8(s) != n {
+			t.Errorf("status %s = %d, want %d", s, s, n)
+		}
+	}
+}
+
+func TestOrderStatus_ZeroValueIsPending(t *testing.T) {
+	var s OrderStatus
+	if s != StatusPending {
+		t.Errorf("zero value = %d, want StatusPending (0)", s)
+	}
+	if s.String() != "pending" {
+		t.Errorf("zero value String() = %q, want %q", s.String(), "pending")
+	}
+}
+
 func TestOrderStatus_IsTerminal(t *testing.T) {
-	terminal := []OrderStatus{StatusCompleted, StatusClosed, StatusCancelled}
-	nonTerminal := []OrderStatus{StatusUnknown, StatusPending, StatusPaid, StatusDelivered}
+	terminal := []OrderStatus{
+		StatusCompleted,
+		StatusClosed,
+		StatusCancelled,
+	}
+	nonTerminal := []OrderStatus{
+		StatusPending,
+		StatusPaid,
+		StatusDelivered,
+	}
 
 	for _, s := range terminal {
 		if !s.IsTerminal() {
@@ -55,10 +89,23 @@ func TestOrderStatus_CanTransitionTo(t *testing.T) {
 	}
 
 	// 非法：终态出发禁止任何跃迁
-	for _, from := range []OrderStatus{StatusCompleted, StatusClosed, StatusCancelled, StatusUnknown} {
-		for _, to := range []OrderStatus{StatusPending, StatusPaid, StatusDelivered, StatusCompleted} {
+	terminals := []OrderStatus{
+		StatusCompleted,
+		StatusClosed,
+		StatusCancelled,
+	}
+	allTargets := []OrderStatus{
+		StatusPending,
+		StatusPaid,
+		StatusDelivered,
+		StatusCompleted,
+		StatusClosed,
+		StatusCancelled,
+	}
+	for _, from := range terminals {
+		for _, to := range allTargets {
 			if from.CanTransitionTo(to) {
-				t.Errorf("%s -> %s should be disallowed", from, to)
+				t.Errorf("%s -> %s should be disallowed (terminal)", from, to)
 			}
 		}
 	}
@@ -70,8 +117,10 @@ func TestOrderStatus_CanTransitionTo(t *testing.T) {
 		}
 	}
 
-	// 非法：Paid 不可直跳 Completed
-	if StatusPaid.CanTransitionTo(StatusCompleted) {
-		t.Errorf("Paid -> Completed should be disallowed (must go Delivered first)")
+	// 非法：Paid 不可直跳 Completed / Cancelled
+	for _, to := range []OrderStatus{StatusCompleted, StatusCancelled} {
+		if StatusPaid.CanTransitionTo(to) {
+			t.Errorf("Paid -> %s should be disallowed", to)
+		}
 	}
 }

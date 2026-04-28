@@ -22,7 +22,7 @@ func TestCloseWorker_PollConsumesExpiredAndAcks(t *testing.T) {
 			orderNo:    n,
 			orderToken: "t-" + n,
 			status:     orderflow.StatusPending,
-			payMethod:  "wechat",
+			payMethod:  orderflow.PayMethodWechat,
 			expireAt:   now.Add(-time.Minute),
 		})
 		_, _ = rig.queue.Enqueue(ctx, n, now.Add(-time.Minute))
@@ -71,7 +71,7 @@ func TestCloseWorker_ProcessOneOnNotExpiredSkipsButAcks(t *testing.T) {
 		orderNo:    "FUTURE",
 		orderToken: "tf",
 		status:     orderflow.StatusPending,
-		payMethod:  "wechat",
+		payMethod:  orderflow.PayMethodWechat,
 		expireAt:   time.Now().Add(time.Hour), // 未过期
 	})
 	_, _ = rig.queue.Enqueue(ctx, "FUTURE", time.Now().Add(-time.Second))

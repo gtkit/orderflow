@@ -23,7 +23,7 @@ func TestClose_HappyPath_ExpiredPending(t *testing.T) {
 		orderToken: "T-1",
 		userID:     1001,
 		status:     StatusPending,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 		expireAt:   time.Now().Add(-time.Minute), // 已过期
 	})
 
@@ -139,7 +139,7 @@ func TestClose_CASRaceLostToPaid(t *testing.T) {
 		orderNo:   "NO-RACE",
 		status:    StatusPending,
 		expireAt:  time.Now().Add(-time.Minute),
-		payMethod: "wechat",
+		payMethod: PayMethodWechat,
 	})
 	// 网关 Close 成功，但 CAS 时被支付回调抢先
 	env.store.CASCloseLosesToPaidOnce = true
@@ -178,7 +178,7 @@ func TestReconcilePaid_HappyPath(t *testing.T) {
 		productTitle:  "VIP",
 		originalPrice: 9900,
 		payAmount:     9900,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		tradeNo:       "TXN-RP",
 		paidAt:        &paidAt,
 	})
@@ -238,7 +238,7 @@ func TestReconcilePaid_HookFailureBubbles(t *testing.T) {
 		status:    StatusPaid,
 		tradeNo:   "TXN",
 		paidAt:    &paidAt,
-		payMethod: "wechat",
+		payMethod: PayMethodWechat,
 	})
 	err := env.engine.ReconcilePaid(context.Background(), "NO-FAIL")
 	if err == nil {
@@ -292,7 +292,7 @@ func TestCloseByAdmin_ClosesUnexpiredPending(t *testing.T) {
 		orderToken: "T-ADM",
 		userID:     1001,
 		status:     StatusPending,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 		expireAt:   time.Now().Add(time.Hour), // 未过期——标准 Close 会跳过
 	})
 

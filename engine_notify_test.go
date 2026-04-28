@@ -25,7 +25,7 @@ func seedPendingOrder(env *testEnv, orderNo string) *testOrder {
 		productTitle:  "VIP",
 		originalPrice: 9900,
 		payAmount:     9900,
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		expireAt:      time.Now().Add(time.Hour),
 	}
 	env.store.seed(o)
@@ -130,7 +130,7 @@ func TestHandleNotify_IdempotentOnDelivered(t *testing.T) {
 		userID:     1001,
 		status:     StatusDelivered,
 		payAmount:  9900,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-D", 9900, "TXN-D")
 
@@ -155,7 +155,7 @@ func TestHandleNotify_PaidRetryRefinalizes(t *testing.T) {
 		payAmount:     9900,
 		originalPrice: 9900,
 		productTitle:  "VIP",
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 		tradeNo:       "TXN-R",
 		paidAt:        &paidAt,
 	})
@@ -178,7 +178,7 @@ func TestHandleNotify_PaidRetryWithTradeNoMismatchSkipped(t *testing.T) {
 		orderNo:   "NO-TN",
 		status:    StatusPaid,
 		payAmount: 9900,
-		payMethod: "wechat",
+		payMethod: PayMethodWechat,
 		tradeNo:   "TXN-ORIGINAL",
 		paidAt:    &paidAt,
 	})
@@ -207,7 +207,7 @@ func TestHandleNotify_ClosedOrderReopenedByGatewayConfirm(t *testing.T) {
 		payAmount:     9900,
 		originalPrice: 9900,
 		productTitle:  "VIP",
-		payMethod:     "wechat",
+		payMethod:     PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-RE", 9900, "TXN-RE")
 	// 网关查询确认：的确已支付
@@ -242,7 +242,7 @@ func TestHandleNotify_ClosedButGatewayQueryKeepsFailing(t *testing.T) {
 		userID:     1001,
 		status:     StatusClosed,
 		payAmount:  9900,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-QERR", 9900, "TXN")
 	env.gw.QueryErr = errTestQueryDown // 让 Query 持续失败
@@ -271,7 +271,7 @@ func TestHandleNotify_ClosedQueryAmountMismatch(t *testing.T) {
 		userID:     1001,
 		status:     StatusClosed,
 		payAmount:  9900,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-AM", 9900, "TXN")
 	// 网关 Query 返回 Paid，但金额异常（中间人攻击或网关 bug 场景）
@@ -299,7 +299,7 @@ func TestHandleNotify_ClosedCASReopenError(t *testing.T) {
 		userID:     1001,
 		status:     StatusClosed,
 		payAmount:  9900,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-CE", 9900, "TXN")
 	env.gw.QueryResp = QueryResult{
@@ -331,7 +331,7 @@ func TestHandleNotify_ClosedReopenMissed(t *testing.T) {
 		userID:     1001,
 		status:     StatusClosed,
 		payAmount:  9900,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-MISS", 9900, "TXN")
 	env.gw.QueryResp = QueryResult{
@@ -367,7 +367,7 @@ func TestCloseFallback_RetriesAfterTransientGatewayFailure(t *testing.T) {
 		orderToken: "T-RETRY",
 		userID:     1001,
 		status:     StatusPending,
-		payMethod:  "wechat",
+		payMethod:  PayMethodWechat,
 		expireAt:   time.Now().Add(-time.Minute),
 	})
 
@@ -404,7 +404,7 @@ func TestHandleNotify_ClosedButGatewayReportsNotPaid(t *testing.T) {
 		orderNo:   "NO-CL",
 		status:    StatusClosed,
 		payAmount: 9900,
-		payMethod: "wechat",
+		payMethod: PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-CL", 9900, "TXN")
 	// 网关查询：其实未支付（矛盾情况）
@@ -448,7 +448,7 @@ func TestHandleNotify_UnexpectedStatusRaisesAnomaly(t *testing.T) {
 		orderNo:   "NO-CAN",
 		status:    StatusCancelled, // 非 Pending/Paid/Closed/Delivered/Completed 之外
 		payAmount: 9900,
-		payMethod: "wechat",
+		payMethod: PayMethodWechat,
 	})
 	env.gw.NotifyResult = makeNotify("NO-CAN", 9900, "TXN")
 
@@ -513,7 +513,8 @@ func TestHandleNotify_RecheckSeesClosedAfterCASMiss(t *testing.T) {
 	seedPendingOrder(env, "NO-CL-R")
 	env.gw.NotifyResult = makeNotify("NO-CL-R", 9900, "TXN")
 	// 注入竞态：CAS 返回 0，状态改为 Closed → 走 handleClosedPaidNotify
-	env.store.ConfirmPaidRaceToStatus = StatusClosed
+	closedStatus := StatusClosed
+	env.store.ConfirmPaidRaceToStatus = &closedStatus
 	// 让网关 Query 确认已付，测试能正常恢复
 	env.gw.QueryResp = QueryResult{
 		OutTradeNo: "NO-CL-R", TransactionID: "TXN",
@@ -532,7 +533,8 @@ func TestHandleNotify_RecheckSeesDeliveredAfterCASMiss(t *testing.T) {
 	env := newTestEnv(t)
 	seedPendingOrder(env, "NO-DL-R")
 	env.gw.NotifyResult = makeNotify("NO-DL-R", 9900, "TXN")
-	env.store.ConfirmPaidRaceToStatus = StatusDelivered
+	deliveredStatus := StatusDelivered
+	env.store.ConfirmPaidRaceToStatus = &deliveredStatus
 
 	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
 
@@ -547,7 +549,8 @@ func TestHandleNotify_RecheckSeesCancelledAfterCASMiss(t *testing.T) {
 	env := newTestEnv(t)
 	seedPendingOrder(env, "NO-CN-R")
 	env.gw.NotifyResult = makeNotify("NO-CN-R", 9900, "TXN")
-	env.store.ConfirmPaidRaceToStatus = StatusCancelled
+	cancelledStatus := StatusCancelled
+	env.store.ConfirmPaidRaceToStatus = &cancelledStatus
 
 	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
 

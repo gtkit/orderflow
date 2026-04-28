@@ -9,12 +9,9 @@ import (
 
 // Create 入参的字段上限。取值贴合底层 DB 列与支付网关实际限制：
 //   - product_title varchar(255)，微信 Subject 限 128 字节；
-//   - product_type varchar(32)；pay_method varchar(32)；
 //   - client_ip varbinary(16) 存 IPv4/IPv6 二进制，长度上限由 net.ParseIP 保证。
 const (
 	maxCreateProductTitleLen = 128
-	maxCreateProductTypeLen  = 32
-	maxCreatePayMethodLen    = 32
 )
 
 // Create 创建订单并请求支付。
@@ -46,11 +43,8 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 	if n := len(req.Product.Title); n == 0 || n > maxCreateProductTitleLen {
 		return nil, fmt.Errorf("%w: Product.Title length %d not in [1, %d]", ErrInvalidConfig, n, maxCreateProductTitleLen)
 	}
-	if len(req.Product.Type) > maxCreateProductTypeLen {
-		return nil, fmt.Errorf("%w: Product.Type length %d exceeds %d", ErrInvalidConfig, len(req.Product.Type), maxCreateProductTypeLen)
-	}
-	if n := len(req.PayMethod); n == 0 || n > maxCreatePayMethodLen {
-		return nil, fmt.Errorf("%w: PayMethod length %d not in [1, %d]", ErrInvalidConfig, n, maxCreatePayMethodLen)
+	if req.PayMethod == 0 {
+		return nil, fmt.Errorf("%w: PayMethod must be specified", ErrInvalidConfig)
 	}
 	if req.ClientIP != "" && net.ParseIP(req.ClientIP) == nil {
 		return nil, fmt.Errorf("%w: ClientIP %q is not a valid IP address", ErrInvalidConfig, req.ClientIP)

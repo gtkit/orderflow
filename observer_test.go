@@ -157,7 +157,7 @@ func TestObserver_FullPaymentFlowEvents(t *testing.T) {
 	env.store.seed(&testOrder{
 		orderNo: "FLOW-1", orderToken: "T-FLOW", userID: 1001,
 		status: StatusPending, productID: 2001, productTitle: "VIP",
-		originalPrice: 9900, payAmount: 9900, payMethod: "wechat",
+		originalPrice: 9900, payAmount: 9900, payMethod: PayMethodWechat,
 		expireAt: time.Now().Add(time.Hour),
 	})
 	env.gw.NotifyResult = makeNotify("FLOW-1", 9900, "TXN-FLOW")
@@ -189,7 +189,7 @@ func TestObserver_FiresOnClosed(t *testing.T) {
 
 	env.store.seed(&testOrder{
 		orderNo: "CLS", orderToken: "T-CLS", userID: 1001,
-		status: StatusPending, payMethod: "wechat",
+		status: StatusPending, payMethod: PayMethodWechat,
 		expireAt: time.Now().Add(-time.Minute), // already expired
 	})
 	mustNotErr(t, env.engine.Close(ctx, "CLS"), "Close")
@@ -211,7 +211,7 @@ func TestObserver_FiresOnAnomaly(t *testing.T) {
 	env.store.seed(&testOrder{
 		orderNo: "AM", orderToken: "T-AM", userID: 1001,
 		status: StatusPending, productID: 2001,
-		payAmount: 9900, payMethod: "wechat",
+		payAmount: 9900, payMethod: PayMethodWechat,
 		expireAt: time.Now().Add(time.Hour),
 	})
 	env.gw.NotifyResult = makeNotify("AM", 1, "TXN-AM") // 金额错配
@@ -234,7 +234,7 @@ func TestCloseByUser_Success(t *testing.T) {
 	ctx := context.Background()
 	env.store.seed(&testOrder{
 		orderNo: "U1", orderToken: "T-U1", userID: 1001,
-		status: StatusPending, payMethod: "wechat",
+		status: StatusPending, payMethod: PayMethodWechat,
 		expireAt: time.Now().Add(-time.Minute),
 	})
 
@@ -246,7 +246,7 @@ func TestCloseByUser_WrongUserForbidden(t *testing.T) {
 	env := newTestEnv(t)
 	env.store.seed(&testOrder{
 		orderNo: "U2", orderToken: "T-U2", userID: 1001,
-		status: StatusPending, payMethod: "wechat",
+		status: StatusPending, payMethod: PayMethodWechat,
 		expireAt: time.Now().Add(-time.Minute),
 	})
 
