@@ -16,6 +16,32 @@
 
 ### Security
 
+## [1.3.0] - 2026-04-28
+
+⚠ **破坏性变更**：移除 `*slog.Logger`，改用自定义 `orderflow.Logger` 接口。详见下方"Removed/Changed"。
+
+升级路径（业务方 v1.2.x → v1.3.0）：
+1. 把 `Config.Logger *slog.Logger` 改成实现 `orderflow.Logger` 接口的对象（推荐包装 `github.com/gtkit/logger`，参考 `logger.go` GoDoc 的"包装示例"）。
+2. 调用 `engine.Logger()` 拿到的不再是 `*slog.Logger` 而是 `orderflow.Logger`——业务侧使用 `Engine.Logger()` 输出日志的代码需改成 `engine.Logger().Error(ctx, msg, orderflow.String(...))` 风格。
+3. `drivers/rediscache.WithStreamLogger(...)` 入参类型从 `*slog.Logger` 改成 `orderflow.Logger`。
+4. 不接 Logger 的业务方无需任何改动——内置 nopLogger 自动接管，所有日志被丢弃。
+
+### Removed
+- ⚠ **`Config.Logger` 类型由 `*slog.Logger` 改为 `orderflow.Logger`**——orderflow 核心包不再依赖 `log/slog` / `go.uber.org/zap` / `github.com/gtkit/logger` 任何具体日志框架，只暴露最小的 4 方法接口
+- ⚠ **`Engine.Logger() *slog.Logger` 返回类型改为 `orderflow.Logger`**
+- ⚠ **`drivers/rediscache.WithStreamLogger(*slog.Logger)` 入参类型改为 `orderflow.Logger`**
+- 移除内部辅助函数 `nopLogger() *slog.Logger`，替换为 `nopLogger{}` 零值结构（同名导出，但是类型不是函数）
+
+### Added
+- 新增 `orderflow.Logger` 接口（`Debug` / `Info` / `Warn` / `Error` 四方法 + `ctx` + `Field` 列表），刻意保持最小，让任何主流日志框架都能一层薄包装实现
+- 新增 `orderflow.Field` 结构与构造器：`String` / `Int` / `Int64` / `Uint64` / `Any` / `Err`
+- `logger.go` GoDoc 包含完整的 `github.com/gtkit/logger` 包装示例（推荐实现），业务方复制即可用
+
+### Changed
+- 核心包零外部日志依赖：所有内部日志调用从 `e.logger.WarnContext(ctx, msg, slog.X(...))` 改为 `e.logger.Warn(ctx, msg, orderflow.X(...))`，与 Logger 接口风格一致
+- `worker/{close_worker,close_fallback,delivery_fallback}` 各 logger 字段类型从 `*slog.Logger` 改为 `orderflow.Logger`，复用 `Engine.Logger()` 注入
+- `drivers/rediscache.NewStatusStream` 默认 logger 从 `slog.Default()` 改为内置 nop——业务方需通过 `WithStreamLogger` 显式注入才会输出订阅 panic 等日志
+
 ## [1.2.0] - 2026-04-28
 
 ### Added

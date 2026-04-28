@@ -3,7 +3,6 @@ package orderflow
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 )
 
@@ -25,23 +24,23 @@ func (e *Engine[O]) Close(ctx context.Context, orderNo string) (err error) {
 		return fmt.Errorf("orderflow: query order for close: %w", err)
 	}
 	if !found {
-		e.logger.WarnContext(ctx, "orderflow: close skipped: order not found",
-			slog.String("order_no", orderNo),
+		e.logger.Warn(ctx, "orderflow: close skipped: order not found",
+			String("order_no", orderNo),
 		)
 		return nil
 	}
 
 	if order.Status() != StatusPending {
-		e.logger.DebugContext(ctx, "orderflow: close skipped: order not pending",
-			slog.String("order_no", orderNo),
-			slog.String("status", order.Status().String()),
+		e.logger.Debug(ctx, "orderflow: close skipped: order not pending",
+			String("order_no", orderNo),
+			String("status", order.Status().String()),
 		)
 		return nil
 	}
 
 	if time.Now().Before(order.ExpireAt()) {
-		e.logger.DebugContext(ctx, "orderflow: close skipped: order not expired yet",
-			slog.String("order_no", orderNo),
+		e.logger.Debug(ctx, "orderflow: close skipped: order not expired yet",
+			String("order_no", orderNo),
 		)
 		return nil
 	}
@@ -79,8 +78,8 @@ func (e *Engine[O]) Close(ctx context.Context, orderNo string) (err error) {
 			e.onClosed(ctx, order, ClosedReasonTimeout)
 		})
 	}
-	e.logger.InfoContext(ctx, "orderflow: order closed",
-		slog.String("order_no", orderNo),
+	e.logger.Info(ctx, "orderflow: order closed",
+		String("order_no", orderNo),
 	)
 	return nil
 }
@@ -140,9 +139,9 @@ func (e *Engine[O]) CloseByAdmin(ctx context.Context, orderNo, reason string) er
 		return ErrOrderNotFound
 	}
 	if order.Status() != StatusPending {
-		e.logger.InfoContext(ctx, "orderflow: admin close skipped: order not pending",
-			"order_no", orderNo,
-			"status", order.Status().String(),
+		e.logger.Info(ctx, "orderflow: admin close skipped: order not pending",
+			String("order_no", orderNo),
+			String("status", order.Status().String()),
 		)
 		return nil
 	}
@@ -190,10 +189,10 @@ func (e *Engine[O]) afterClose(ctx context.Context, order O) error {
 		return nil
 	}
 	if e.gateway.IsIgnorableCloseError(channel, err) {
-		e.logger.DebugContext(ctx, "orderflow: gateway close returned ignorable error, continue local close",
-			slog.String("order_no", order.OrderNo()),
-			slog.String("channel", string(channel)),
-			slog.Any("error", err),
+		e.logger.Debug(ctx, "orderflow: gateway close returned ignorable error, continue local close",
+			String("order_no", order.OrderNo()),
+			String("channel", string(channel)),
+			Any("error", err),
 		)
 		return nil
 	}
@@ -239,8 +238,8 @@ func (e *Engine[O]) ReconcilePaid(ctx context.Context, orderNo string) (err erro
 		return fmt.Errorf("orderflow: query order for reconcile: %w", err)
 	}
 	if !found {
-		e.logger.WarnContext(ctx, "orderflow: reconcile skipped: order not found",
-			slog.String("order_no", orderNo),
+		e.logger.Warn(ctx, "orderflow: reconcile skipped: order not found",
+			String("order_no", orderNo),
 		)
 		return nil
 	}
@@ -251,9 +250,9 @@ func (e *Engine[O]) ReconcilePaid(ctx context.Context, orderNo string) (err erro
 	case StatusPaid:
 		// 继续执行补偿
 	default:
-		e.logger.InfoContext(ctx, "orderflow: reconcile skipped: order not in paid state",
-			slog.String("order_no", order.OrderNo()),
-			slog.String("status", order.Status().String()),
+		e.logger.Info(ctx, "orderflow: reconcile skipped: order not in paid state",
+			String("order_no", order.OrderNo()),
+			String("status", order.Status().String()),
 		)
 		return nil
 	}

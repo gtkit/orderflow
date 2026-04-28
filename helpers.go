@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"time"
 )
@@ -20,10 +19,10 @@ import (
 func (e *Engine[O]) safeHook(ctx context.Context, name, orderNo string, fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			e.logger.ErrorContext(ctx, "orderflow: hook panic recovered",
-				slog.String("hook", name),
-				slog.String("order_no", orderNo),
-				slog.Any("panic", r),
+			e.logger.Error(ctx, "orderflow: hook panic recovered",
+				String("hook", name),
+				String("order_no", orderNo),
+				Any("panic", r),
 			)
 			e.observer.Event(ctx, EventAnomaly, orderNo, map[string]any{
 				"kind":  "hook_panic",
@@ -44,10 +43,10 @@ func (e *Engine[O]) safeHookE(ctx context.Context, name, orderNo string, fn func
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("orderflow: hook %s panic: %v", name, r)
-			e.logger.ErrorContext(ctx, "orderflow: hook panic recovered",
-				slog.String("hook", name),
-				slog.String("order_no", orderNo),
-				slog.Any("panic", r),
+			e.logger.Error(ctx, "orderflow: hook panic recovered",
+				String("hook", name),
+				String("order_no", orderNo),
+				Any("panic", r),
 			)
 			e.observer.Event(ctx, EventAnomaly, orderNo, map[string]any{
 				"kind":  "hook_panic",
@@ -67,10 +66,10 @@ func (e *Engine[O]) safeHookE(ctx context.Context, name, orderNo string, fn func
 // 关键字配置告警。
 func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID int64, status OrderStatus, expireAt time.Time) {
 	if err := e.cache.Set(ctx, orderToken, userID, status, expireAt); err != nil {
-		e.logger.WarnContext(ctx, "orderflow: set status cache failed, delete for consistency",
-			slog.String("order_token", orderToken),
-			slog.String("status", status.String()),
-			slog.Any("error", err),
+		e.logger.Warn(ctx, "orderflow: set status cache failed, delete for consistency",
+			String("order_token", orderToken),
+			String("status", status.String()),
+			Err(err),
 		)
 		e.observer.Event(ctx, EventAnomaly, "", map[string]any{
 			"kind":        "publish_status_cache_set_failed",
@@ -79,11 +78,11 @@ func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID
 			"reason":      err.Error(),
 		})
 		if delErr := e.cache.Delete(ctx, orderToken); delErr != nil {
-			e.logger.ErrorContext(ctx, "orderflow: ALERT cache inconsistent: set and delete both failed",
-				slog.String("order_token", orderToken),
-				slog.String("status", status.String()),
-				slog.Any("set_error", err),
-				slog.Any("delete_error", delErr),
+			e.logger.Error(ctx, "orderflow: ALERT cache inconsistent: set and delete both failed",
+				String("order_token", orderToken),
+				String("status", status.String()),
+				Any("set_error", err),
+				Any("delete_error", delErr),
 			)
 			e.observer.Event(ctx, EventAnomaly, "", map[string]any{
 				"kind":         "publish_status_cache_inconsistent",
@@ -96,10 +95,10 @@ func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID
 		return
 	}
 	if err := e.stream.Publish(ctx, orderToken, status); err != nil {
-		e.logger.WarnContext(ctx, "orderflow: publish status failed, clients will fallback to polling",
-			slog.String("order_token", orderToken),
-			slog.String("status", status.String()),
-			slog.Any("error", err),
+		e.logger.Warn(ctx, "orderflow: publish status failed, clients will fallback to polling",
+			String("order_token", orderToken),
+			String("status", status.String()),
+			Err(err),
 		)
 		e.observer.Event(ctx, EventAnomaly, "", map[string]any{
 			"kind":        "publish_status_stream_failed",
@@ -126,11 +125,11 @@ func (e *Engine[O]) appendLog(ctx context.Context, order O, from, to OrderStatus
 		CreatedAt:  time.Now(),
 	}
 	if err := e.store.AppendLog(ctx, entry); err != nil {
-		e.logger.WarnContext(ctx, "orderflow: append order log failed",
-			slog.String("order_no", order.OrderNo()),
-			slog.String("from", from.String()),
-			slog.String("to", to.String()),
-			slog.Any("error", err),
+		e.logger.Warn(ctx, "orderflow: append order log failed",
+			String("order_no", order.OrderNo()),
+			String("from", from.String()),
+			String("to", to.String()),
+			Err(err),
 		)
 		e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
 			"kind":   "append_log_failed",
@@ -144,10 +143,10 @@ func (e *Engine[O]) appendLog(ctx context.Context, order O, from, to OrderStatus
 
 // recordAnomaly 记录业务异常：打 error 日志 + 触发 Observer 事件 + 调用 OnAnomaly 钩子（如配置）。
 func (e *Engine[O]) recordAnomaly(ctx context.Context, order O, kind AnomalyKind, detail string) {
-	e.logger.ErrorContext(ctx, "orderflow: ALERT anomaly",
-		slog.String("order_no", order.OrderNo()),
-		slog.String("kind", string(kind)),
-		slog.String("detail", detail),
+	e.logger.Error(ctx, "orderflow: ALERT anomaly",
+		String("order_no", order.OrderNo()),
+		String("kind", string(kind)),
+		String("detail", detail),
 	)
 	e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
 		"kind":   string(kind),

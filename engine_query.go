@@ -3,7 +3,6 @@ package orderflow
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 )
 
@@ -25,9 +24,9 @@ func (e *Engine[O]) PollStatus(ctx context.Context, orderToken string, userID in
 	switch {
 	case cacheErr != nil:
 		// 区别于 miss：err 通常意味着 Redis 网络抖动或解析异常，需要可观测。
-		e.logger.ErrorContext(ctx, "orderflow: ALERT poll cache get failed, falling back to db",
-			slog.String("order_token", orderToken),
-			slog.Any("error", cacheErr),
+		e.logger.Error(ctx, "orderflow: ALERT poll cache get failed, falling back to db",
+			String("order_token", orderToken),
+			Any("error", cacheErr),
 		)
 		e.observer.Event(ctx, EventAnomaly, "", map[string]any{
 			"kind":        "poll_cache_get_failed",
@@ -57,9 +56,9 @@ func (e *Engine[O]) PollStatus(ctx context.Context, orderToken string, userID in
 	}
 
 	if setErr := e.cache.Set(ctx, orderToken, order.UserID(), order.Status(), order.ExpireAt()); setErr != nil {
-		e.logger.WarnContext(ctx, "orderflow: backfill status cache failed after db lookup",
-			slog.String("order_token", orderToken),
-			slog.Any("error", setErr),
+		e.logger.Warn(ctx, "orderflow: backfill status cache failed after db lookup",
+			String("order_token", orderToken),
+			Any("error", setErr),
 		)
 	}
 

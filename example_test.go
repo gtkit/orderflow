@@ -196,7 +196,7 @@ func ExampleEngine_HandleNotify() {
 			return
 		}
 		if err := gateway.AckNotify(ch, w); err != nil {
-			engine.Logger().ErrorContext(r.Context(), "ack notify failed")
+			engine.Logger().Error(r.Context(), "ack notify failed", orderflow.Err(err))
 		}
 	}
 

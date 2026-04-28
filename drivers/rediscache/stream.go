@@ -3,7 +3,6 @@ package rediscache
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +17,7 @@ const defaultStreamKeyPrefix = "orderflow:status:events:"
 type StatusStream struct {
 	rdb       *redis.Client
 	keyPrefix string
-	logger    *slog.Logger
+	logger    orderflow.Logger
 }
 
 // StreamOption 是 NewStatusStream 的可选配置。
@@ -29,8 +28,11 @@ func WithStreamKeyPrefix(prefix string) StreamOption {
 	return func(s *StatusStream) { s.keyPrefix = prefix }
 }
 
-// WithStreamLogger 覆盖状态订阅内部使用的 logger。
-func WithStreamLogger(logger *slog.Logger) StreamOption {
+// WithStreamLogger 覆盖状态订阅内部使用的 logger。传 nil 时回退到内置 nop 实现。
+//
+// 业务方应注入与 Engine.Config.Logger 一致的实现（典型是包装 github.com/gtkit/logger
+// 的适配器），保证 driver 内 panic recover 等日志能进入统一的采集链路。
+func WithStreamLogger(logger orderflow.Logger) StreamOption {
 	return func(s *StatusStream) {
 		if logger != nil {
 			s.logger = logger
@@ -38,18 +40,27 @@ func WithStreamLogger(logger *slog.Logger) StreamOption {
 	}
 }
 
-// NewStatusStream 构造 StatusStream。rdb 必填。
+// NewStatusStream 构造 StatusStream。rdb 必填。logger 默认 nop（不输出日志）。
 func NewStatusStream(rdb *redis.Client, opts ...StreamOption) *StatusStream {
 	s := &StatusStream{
 		rdb:       rdb,
 		keyPrefix: defaultStreamKeyPrefix,
-		logger:    slog.Default(),
+		logger:    nopStreamLogger{},
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
 }
+
+// nopStreamLogger 是 orderflow.Logger 的零开销默认实现。
+// 业务方未注入 WithStreamLogger 时，subscription 的 panic recover 等日志被丢弃。
+type nopStreamLogger struct{}
+
+func (nopStreamLogger) Debug(context.Context, string, ...orderflow.Field) {}
+func (nopStreamLogger) Info(context.Context, string, ...orderflow.Field)  {}
+func (nopStreamLogger) Warn(context.Context, string, ...orderflow.Field)  {}
+func (nopStreamLogger) Error(context.Context, string, ...orderflow.Field) {}
 
 var _ orderflow.StatusStream = (*StatusStream)(nil)
 
@@ -128,7 +139,7 @@ type subscription struct {
 	events chan orderflow.OrderStatus
 	done   chan struct{}
 	once   sync.Once
-	logger *slog.Logger
+	logger orderflow.Logger
 }
 
 func (s *subscription) Events() <-chan orderflow.OrderStatus {
@@ -155,8 +166,8 @@ func (s *subscription) forward(ctx context.Context) {
 	defer close(s.events)
 	defer func() {
 		if r := recover(); r != nil && s.logger != nil {
-			s.logger.ErrorContext(ctx, "rediscache: status subscription forward panic recovered",
-				slog.Any("panic", r),
+			s.logger.Error(ctx, "rediscache: status subscription forward panic recovered",
+				orderflow.Any("panic", r),
 			)
 		}
 	}()

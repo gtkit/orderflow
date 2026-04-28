@@ -3,8 +3,6 @@ package orderflow
 import (
 	"cmp"
 	"fmt"
-	"io"
-	"log/slog"
 	"strings"
 	"time"
 )
@@ -64,9 +62,12 @@ type Config[O OrderSnapshot] struct {
 	OrderExpire time.Duration
 	// Timezone IANA 时区名（如 "Asia/Shanghai"）。空或解析失败时使用 time.Local。
 	Timezone string
-	// Logger 日志实例。零值使用将日志丢弃的 nop logger（避免无意义噪音）。
-	// 接入 gtkit/logger：slog.New(logger.SlogHandler())。
-	Logger *slog.Logger
+	// Logger 日志接入。零值使用内置 nopLogger（丢弃所有日志）。
+	//
+	// 业务方需把自己的日志框架（推荐 github.com/gtkit/logger）包装成 Logger 接口
+	// 注入。orderflow 核心包刻意不依赖任何具体日志框架——保持零外部依赖。
+	// 包装示例与契约见 Logger 接口 GoDoc。
+	Logger Logger
 
 	// Observer metrics / tracing 观测器。零值使用 nopObserver（零开销）。
 	// 业务侧注入 Prometheus / OpenTelemetry adapter 时必须保证非阻塞 + 不 panic。
@@ -118,7 +119,7 @@ type Engine[O OrderSnapshot] struct {
 	// 参数
 	orderExpire           time.Duration
 	location              *time.Location
-	logger                *slog.Logger
+	logger                Logger
 	observer              Observer
 	locker                Locker // nil 表示未配置，Create 不加锁
 	createLockTTL         time.Duration
@@ -143,9 +144,9 @@ func New[O OrderSnapshot](cfg Config[O]) (*Engine[O], error) {
 	if genOrderToken == nil {
 		genOrderToken = defaultGenerateOrderToken
 	}
-	logger := cfg.Logger
+	var logger Logger = cfg.Logger
 	if logger == nil {
-		logger = nopLogger()
+		logger = nopLogger{}
 	}
 	observer := cfg.Observer
 	if observer == nil {
@@ -187,7 +188,7 @@ func (e *Engine[O]) DelayQueue() DelayQueue {
 }
 
 // Logger 返回 Engine 内部使用的 logger，便于 worker 子包复用同一配置。
-func (e *Engine[O]) Logger() *slog.Logger {
+func (e *Engine[O]) Logger() Logger {
 	return e.logger
 }
 
@@ -270,7 +271,3 @@ func resolveLocation(tz string) *time.Location {
 	return loc
 }
 
-// nopLogger 返回一个丢弃全部输出的 slog.Logger，用于未注入 Logger 时的安全退路。
-func nopLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}

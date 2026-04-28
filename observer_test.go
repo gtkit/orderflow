@@ -295,7 +295,7 @@ func (p *panickingObserver) Duration(context.Context, string, time.Duration, err
 
 func TestSafeObserver_RecoversFromEventPanic(t *testing.T) {
 	inner := &panickingObserver{panicOnEvent: true}
-	wrapped := wrapObserver(inner, nopLogger())
+	wrapped := wrapObserver(inner, nopLogger{})
 
 	// 不应 panic 出来
 	wrapped.Event(context.Background(), EventOrderPaid, "O1", map[string]any{"k": 1})
@@ -306,7 +306,7 @@ func TestSafeObserver_RecoversFromEventPanic(t *testing.T) {
 
 func TestSafeObserver_RecoversFromDurationPanic(t *testing.T) {
 	inner := &panickingObserver{panicOnDuration: true}
-	wrapped := wrapObserver(inner, nopLogger())
+	wrapped := wrapObserver(inner, nopLogger{})
 
 	wrapped.Duration(context.Background(), OpCreate, time.Millisecond, nil)
 	if inner.durationCalls != 1 {
@@ -316,7 +316,7 @@ func TestSafeObserver_RecoversFromDurationPanic(t *testing.T) {
 
 func TestSafeObserver_NopIsNotWrapped(t *testing.T) {
 	// nopObserver 走零开销路径，不应被 safeObserver 包装
-	got := wrapObserver(nopObserver{}, nopLogger())
+	got := wrapObserver(nopObserver{}, nopLogger{})
 	if _, ok := got.(nopObserver); !ok {
 		t.Fatalf("wrapObserver(nop) should return nopObserver, got %T", got)
 	}
@@ -324,8 +324,8 @@ func TestSafeObserver_NopIsNotWrapped(t *testing.T) {
 
 func TestSafeObserver_DoubleWrapIsIdempotent(t *testing.T) {
 	inner := &panickingObserver{}
-	first := wrapObserver(inner, nopLogger())
-	second := wrapObserver(first, nopLogger())
+	first := wrapObserver(inner, nopLogger{})
+	second := wrapObserver(first, nopLogger{})
 	if first != second {
 		t.Fatalf("double wrap should return the same safeObserver")
 	}

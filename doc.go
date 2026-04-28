@@ -88,11 +88,12 @@
 //
 // # 日志与敏感信息
 //
-// Engine 会把 order_no / trade_no / user_id / amount / order_token 写进结构化日志。
-// 这些字段在 PCI-DSS / 个人信息保护法等框架下可能属于敏感数据。建议：
+// Engine 会把 order_no / trade_no / user_id / amount / order_token 写进结构化日志
+// （通过 Config.Logger 注入的 orderflow.Logger 接口）。这些字段在 PCI-DSS / 个人信息
+// 保护法等框架下可能属于敏感数据。建议：
 //
-//   - 使用 slog.JSONHandler 或标准 slog.TextHandler——它们会转义换行/引号，避免
-//     攻击者通过 TradeNo 注入假日志行；
-//   - 若需脱敏，在业务层自定义 slog.Handler 的 ReplaceAttr 钩子统一处理敏感字段；
+//   - 使用结构化日志后端（如 github.com/gtkit/logger 包装为 orderflow.Logger 实现）——
+//     它们会转义换行/引号，避免攻击者通过 TradeNo 注入假日志行；
+//   - 若需脱敏，在 Logger 实现内部对 Field.Value 做敏感字段过滤（统一处理，避免散落各处）；
 //   - 日志收集链路（Kafka / ES）的访问权限按最小原则控制。
 package orderflow

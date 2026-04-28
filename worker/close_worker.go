@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -20,7 +19,7 @@ import (
 type CloseWorker[O orderflow.OrderSnapshot] struct {
 	engine *orderflow.Engine[O]
 	queue  orderflow.DelayQueue
-	logger *slog.Logger
+	logger orderflow.Logger
 	opts   CloseOptions
 	pool   chan struct{}
 	wg     sync.WaitGroup
@@ -42,8 +41,8 @@ func NewCloseWorker[O orderflow.OrderSnapshot](engine *orderflow.Engine[O], opts
 	opts = opts.withDefaults()
 	logger := engine.Logger()
 	if err := opts.Validate(); err != nil {
-		logger.Warn("orderflow: close worker options validation warning",
-			"error", err.Error(),
+		logger.Warn(context.Background(), "orderflow: close worker options validation warning",
+			orderflow.Err(err),
 		)
 	}
 	return &CloseWorker[O]{
@@ -57,8 +56,8 @@ func NewCloseWorker[O orderflow.OrderSnapshot](engine *orderflow.Engine[O], opts
 
 // Run 启动轮询循环，阻塞直到 ctx 取消。ctx 取消后等待所有已派发的任务收尾。
 func (w *CloseWorker[O]) Run(ctx context.Context) {
-	w.logger.InfoContext(ctx, "orderflow: close worker started")
-	defer w.logger.InfoContext(ctx, "orderflow: close worker stopped")
+	w.logger.Info(ctx, "orderflow: close worker started")
+	defer w.logger.Info(ctx, "orderflow: close worker stopped")
 
 	ticker := time.NewTicker(w.opts.PollInterval)
 	defer ticker.Stop()
@@ -107,20 +106,20 @@ func (w *CloseWorker[O]) poll(ctx context.Context) error {
 
 	reclaimed, err := w.queue.RequeueExpired(ctx, w.opts.PollBatchSize)
 	if err != nil {
-		w.logger.ErrorContext(ctx, "orderflow: requeue expired failed",
-			slog.Any("error", err),
+		w.logger.Error(ctx, "orderflow: requeue expired failed",
+			orderflow.Any("error", err),
 		)
 		lastErr = err
 	} else if len(reclaimed) > 0 {
-		w.logger.InfoContext(ctx, "orderflow: requeued expired inflight tasks",
-			slog.Int("count", len(reclaimed)),
+		w.logger.Info(ctx, "orderflow: requeued expired inflight tasks",
+			orderflow.Int("count", len(reclaimed)),
 		)
 	}
 
 	orderNos, err := w.queue.ReserveExpired(ctx, w.opts.PollBatchSize, w.opts.PollLease)
 	if err != nil {
-		w.logger.ErrorContext(ctx, "orderflow: reserve expired failed",
-			slog.Any("error", err),
+		w.logger.Error(ctx, "orderflow: reserve expired failed",
+			orderflow.Any("error", err),
 		)
 		pollErr = err
 		return err
@@ -151,9 +150,9 @@ func (w *CloseWorker[O]) processOne(ctx context.Context, orderNo string) {
 	defer w.stats.inflight.Add(-1)
 	defer func() {
 		if r := recover(); r != nil {
-			w.logger.ErrorContext(ctx, "orderflow: panic in close worker recovered",
-				slog.String("order_no", orderNo),
-				slog.Any("panic", r),
+			w.logger.Error(ctx, "orderflow: panic in close worker recovered",
+				orderflow.String("order_no", orderNo),
+				orderflow.Any("panic", r),
 			)
 		}
 	}()
@@ -166,9 +165,9 @@ func (w *CloseWorker[O]) processOne(ctx context.Context, orderNo string) {
 	defer cancel()
 
 	if err := w.engine.Close(closeCtx, orderNo); err != nil {
-		w.logger.ErrorContext(ctx, "orderflow: close order failed",
-			slog.String("order_no", orderNo),
-			slog.Any("error", err),
+		w.logger.Error(ctx, "orderflow: close order failed",
+			orderflow.String("order_no", orderNo),
+			orderflow.Any("error", err),
 		)
 		return
 	}
@@ -182,15 +181,15 @@ func (w *CloseWorker[O]) processOne(ctx context.Context, orderNo string) {
 	if err != nil {
 		// Ack 失败是可容忍错误：下一轮 RequeueExpired 会把任务回收重跑，
 		// engine.Close 本身对"已关闭订单"幂等（非 Pending 直接 skip）。
-		w.logger.ErrorContext(ctx, "orderflow: ack close task failed, will be requeued",
-			slog.String("order_no", orderNo),
-			slog.Any("error", err),
+		w.logger.Error(ctx, "orderflow: ack close task failed, will be requeued",
+			orderflow.String("order_no", orderNo),
+			orderflow.Any("error", err),
 		)
 		return
 	}
 	if !acked {
-		w.logger.WarnContext(ctx, "orderflow: ack missed inflight record",
-			slog.String("order_no", orderNo),
+		w.logger.Warn(ctx, "orderflow: ack missed inflight record",
+			orderflow.String("order_no", orderNo),
 		)
 	}
 }

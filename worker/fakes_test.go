@@ -2,8 +2,6 @@ package worker
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net/http"
 	"sort"
 	"sync"
@@ -268,7 +266,7 @@ func newTestRig(t *testing.T) *testRig {
 		DelayQueue: queue,
 		Cache:      fakeCache{},
 		Stream:     fakeStream{},
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// Logger 留空，使用 orderflow 内置 nopLogger（丢弃所有日志）
 	})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)

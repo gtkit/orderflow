@@ -3,7 +3,6 @@ package orderflow
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 )
@@ -36,17 +35,17 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 	// 防御性长度校验：即使 ParseNotify 已验签，底层协议未必限制字段长度。
 	// 超长 TradeNo 会触发 DB 列截断，超长 OutTradeNo 会让 GetByNo 扫全表——双重风险。
 	if !validNotifyLength(notify) {
-		e.logger.WarnContext(ctx, "orderflow: reject notify with oversized fields",
-			slog.Int("out_trade_no_len", len(notify.OutTradeNo)),
-			slog.Int("transaction_id_len", len(notify.TransactionID)),
+		e.logger.Warn(ctx, "orderflow: reject notify with oversized fields",
+			Int("out_trade_no_len", len(notify.OutTradeNo)),
+			Int("transaction_id_len", len(notify.TransactionID)),
 		)
 		return nil
 	}
 
 	if notify.TradeStatus != TradeStatusPaid {
-		e.logger.InfoContext(ctx, "orderflow: notify not paid, skip",
-			slog.String("trade_status", string(notify.TradeStatus)),
-			slog.String("out_trade_no", notify.OutTradeNo),
+		e.logger.Info(ctx, "orderflow: notify not paid, skip",
+			String("trade_status", string(notify.TradeStatus)),
+			String("out_trade_no", notify.OutTradeNo),
 		)
 		return nil
 	}
@@ -57,17 +56,17 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 		return fmt.Errorf("orderflow: query order for notify: %w", err)
 	}
 	if !found {
-		e.logger.ErrorContext(ctx, "orderflow: ALERT: order not found for paid notify",
-			slog.String("out_trade_no", notify.OutTradeNo),
+		e.logger.Error(ctx, "orderflow: ALERT: order not found for paid notify",
+			String("out_trade_no", notify.OutTradeNo),
 		)
 		return nil
 	}
 
 	switch order.Status() {
 	case StatusDelivered, StatusCompleted:
-		e.logger.InfoContext(ctx, "orderflow: order already delivered, idempotent skip",
-			slog.String("order_no", order.OrderNo()),
-			slog.String("status", order.Status().String()),
+		e.logger.Info(ctx, "orderflow: order already delivered, idempotent skip",
+			String("order_no", order.OrderNo()),
+			String("status", order.Status().String()),
 		)
 		return nil
 	case StatusPaid:
@@ -96,10 +95,10 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 		return e.recheckAfterCASFailed(ctx, notify)
 	}
 
-	e.logger.InfoContext(ctx, "orderflow: order paid successfully",
-		slog.String("order_no", order.OrderNo()),
-		slog.Int64("amount", notify.TotalAmount),
-		slog.String("trade_no", notify.TransactionID),
+	e.logger.Info(ctx, "orderflow: order paid successfully",
+		String("order_no", order.OrderNo()),
+		Int64("amount", notify.TotalAmount),
+		String("trade_no", notify.TransactionID),
 	)
 	e.appendLog(ctx, order, StatusPending, StatusPaid, "system",
 		"paid: trade_no="+notify.TransactionID)
@@ -109,9 +108,9 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 	})
 
 	if err := e.delayQueue.Remove(ctx, notify.OutTradeNo); err != nil {
-		e.logger.WarnContext(ctx, "orderflow: remove delay close failed, non-critical",
-			slog.String("order_no", order.OrderNo()),
-			slog.Any("error", err),
+		e.logger.Warn(ctx, "orderflow: remove delay close failed, non-critical",
+			String("order_no", order.OrderNo()),
+			Any("error", err),
 		)
 	}
 	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusPaid, order.ExpireAt())
@@ -120,9 +119,9 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 	refreshed := e.reloadOrder(ctx, order)
 
 	if err := e.finalizeDelivery(ctx, refreshed, notify); err != nil {
-		e.logger.ErrorContext(ctx, "orderflow: finalize failed, ack gateway and rely on fallback",
-			slog.String("order_no", refreshed.OrderNo()),
-			slog.Any("error", err),
+		e.logger.Error(ctx, "orderflow: finalize failed, ack gateway and rely on fallback",
+			String("order_no", refreshed.OrderNo()),
+			Any("error", err),
 		)
 	}
 	return nil
@@ -141,13 +140,13 @@ func (e *Engine[O]) retryFinalizeForPaid(ctx context.Context, order O, notify No
 			fmt.Sprintf("stored=%s notify=%s", order.TradeNo(), notify.TransactionID))
 		return nil
 	}
-	e.logger.InfoContext(ctx, "orderflow: order already paid, retry finalize",
-		slog.String("order_no", order.OrderNo()),
+	e.logger.Info(ctx, "orderflow: order already paid, retry finalize",
+		String("order_no", order.OrderNo()),
 	)
 	if err := e.finalizeDelivery(ctx, order, notify); err != nil {
-		e.logger.ErrorContext(ctx, "orderflow: finalize retry failed, rely on fallback",
-			slog.String("order_no", order.OrderNo()),
-			slog.Any("error", err),
+		e.logger.Error(ctx, "orderflow: finalize retry failed, rely on fallback",
+			String("order_no", order.OrderNo()),
+			Any("error", err),
 		)
 	}
 	return nil
@@ -161,8 +160,8 @@ func (e *Engine[O]) recheckAfterCASFailed(ctx context.Context, notify NotifyResu
 		return fmt.Errorf("orderflow: recheck order: %w", err)
 	}
 	if !found {
-		e.logger.ErrorContext(ctx, "orderflow: ALERT: order disappeared during notify recheck",
-			slog.String("out_trade_no", notify.OutTradeNo),
+		e.logger.Error(ctx, "orderflow: ALERT: order disappeared during notify recheck",
+			String("out_trade_no", notify.OutTradeNo),
 		)
 		return nil
 	}
@@ -170,8 +169,8 @@ func (e *Engine[O]) recheckAfterCASFailed(ctx context.Context, notify NotifyResu
 	case StatusPaid:
 		return e.retryFinalizeForPaid(ctx, current, notify)
 	case StatusDelivered, StatusCompleted:
-		e.logger.InfoContext(ctx, "orderflow: order already delivered (duplicate notify)",
-			slog.String("order_no", current.OrderNo()),
+		e.logger.Info(ctx, "orderflow: order already delivered (duplicate notify)",
+			String("order_no", current.OrderNo()),
 		)
 		return nil
 	case StatusClosed:
@@ -213,15 +212,15 @@ func (e *Engine[O]) handleClosedPaidNotify(ctx context.Context, order O, notify 
 		return nil
 	}
 	if affected == 0 {
-		e.logger.InfoContext(ctx, "orderflow: cas reopen affected 0, concurrent op won",
-			slog.String("order_no", order.OrderNo()),
+		e.logger.Info(ctx, "orderflow: cas reopen affected 0, concurrent op won",
+			String("order_no", order.OrderNo()),
 		)
 		return nil
 	}
 
-	e.logger.InfoContext(ctx, "orderflow: closed order reopened to paid",
-		slog.String("order_no", order.OrderNo()),
-		slog.String("transaction_id", query.TransactionID),
+	e.logger.Info(ctx, "orderflow: closed order reopened to paid",
+		String("order_no", order.OrderNo()),
+		String("transaction_id", query.TransactionID),
 	)
 	e.appendLog(ctx, order, StatusClosed, StatusPaid, "system",
 		"auto reopen: payment confirmed after close")
@@ -247,9 +246,9 @@ func (e *Engine[O]) handleClosedPaidNotify(ctx context.Context, order O, notify 
 	}
 
 	if err := e.finalizeDelivery(ctx, refreshed, confirmed); err != nil {
-		e.logger.ErrorContext(ctx, "orderflow: finalize after reopen failed, rely on fallback",
-			slog.String("order_no", refreshed.OrderNo()),
-			slog.Any("error", err),
+		e.logger.Error(ctx, "orderflow: finalize after reopen failed, rely on fallback",
+			String("order_no", refreshed.OrderNo()),
+			Any("error", err),
 		)
 	}
 	return nil
@@ -304,9 +303,9 @@ func (e *Engine[O]) finalizeDelivery(ctx context.Context, order O, notify Notify
 			return e.onDelivered(ctx, order)
 		})
 		if hookErr != nil {
-			e.logger.WarnContext(ctx, "orderflow: OnDelivered hook returned error",
-				slog.String("order_no", order.OrderNo()),
-				slog.Any("error", hookErr),
+			e.logger.Warn(ctx, "orderflow: OnDelivered hook returned error",
+				String("order_no", order.OrderNo()),
+				Any("error", hookErr),
 			)
 		}
 	}
@@ -331,9 +330,9 @@ func (e *Engine[O]) normalizeNotifyPaidAt(notify *NotifyResult) {
 func (e *Engine[O]) reloadOrder(ctx context.Context, order O) O {
 	refreshed, found, err := e.store.GetByNo(ctx, order.OrderNo())
 	if err != nil {
-		e.logger.ErrorContext(ctx, "orderflow: ALERT: reload order failed, proceeding with stale snapshot",
-			slog.String("order_no", order.OrderNo()),
-			slog.Any("error", err),
+		e.logger.Error(ctx, "orderflow: ALERT: reload order failed, proceeding with stale snapshot",
+			String("order_no", order.OrderNo()),
+			Any("error", err),
 		)
 		e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
 			"kind":   "reload_failed",
@@ -342,8 +341,8 @@ func (e *Engine[O]) reloadOrder(ctx context.Context, order O) O {
 		return order
 	}
 	if !found {
-		e.logger.ErrorContext(ctx, "orderflow: ALERT: order disappeared during reload",
-			slog.String("order_no", order.OrderNo()),
+		e.logger.Error(ctx, "orderflow: ALERT: order disappeared during reload",
+			String("order_no", order.OrderNo()),
 		)
 		e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
 			"kind": "reload_disappeared",

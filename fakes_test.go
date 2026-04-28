@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -713,7 +711,7 @@ func newTestEnv(t testing.TB) *testEnv {
 		DelayQueue: env.dq,
 		Cache:      env.cache,
 		Stream:     env.stream,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:     nopLogger{},
 
 		OnCreated: func(_ context.Context, o *testOrder) error {
 			env.mu.Lock()

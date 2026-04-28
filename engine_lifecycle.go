@@ -3,7 +3,6 @@ package orderflow
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"time"
 )
@@ -169,9 +168,9 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 	}
 
 	if setErr := e.cache.Set(ctx, orderToken, req.UserID, StatusPending, expireAt); setErr != nil {
-		e.logger.WarnContext(ctx, "orderflow: set pending status cache failed",
-			slog.String("order_token", orderToken),
-			slog.Any("error", setErr),
+		e.logger.Warn(ctx, "orderflow: set pending status cache failed",
+			String("order_token", orderToken),
+			Any("error", setErr),
 		)
 	}
 
@@ -184,9 +183,9 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 			return e.onCreated(ctx, order)
 		})
 		if hookErr != nil {
-			e.logger.WarnContext(ctx, "orderflow: OnCreated hook returned error",
-				slog.String("order_no", orderNo),
-				slog.Any("error", hookErr),
+			e.logger.Warn(ctx, "orderflow: OnCreated hook returned error",
+				String("order_no", orderNo),
+				Any("error", hookErr),
 			)
 		}
 	}
@@ -215,15 +214,15 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 func (e *Engine[O]) rollbackPendingOnEnqueueFail(ctx context.Context, order O, expireAt time.Time) {
 	affected, err := e.store.CASClose(ctx, order.OrderNo())
 	if err != nil {
-		e.logger.ErrorContext(ctx, "orderflow: rollback CAS close failed, order will be reaped by CloseFallback scanner",
-			slog.String("order_no", order.OrderNo()),
-			slog.Any("error", err),
+		e.logger.Error(ctx, "orderflow: rollback CAS close failed, order will be reaped by CloseFallback scanner",
+			String("order_no", order.OrderNo()),
+			Any("error", err),
 		)
 		return
 	}
 	if affected == 0 {
-		e.logger.WarnContext(ctx, "orderflow: rollback CAS close missed (state changed concurrently)",
-			slog.String("order_no", order.OrderNo()),
+		e.logger.Warn(ctx, "orderflow: rollback CAS close missed (state changed concurrently)",
+			String("order_no", order.OrderNo()),
 		)
 		return
 	}
@@ -256,9 +255,9 @@ func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductI
 		}
 		// 降级：记 ALERT 让运维感知；继续走本地 CAS Close。
 		// 网关侧的"旧单未关"由 CloseFallback 后续扫描重试兜底。
-		e.logger.ErrorContext(ctx, "orderflow: ALERT close superseded gateway failed, degraded to local close",
-			slog.String("order_no", existing.OrderNo()),
-			slog.Any("error", afterErr),
+		e.logger.Error(ctx, "orderflow: ALERT close superseded gateway failed, degraded to local close",
+			String("order_no", existing.OrderNo()),
+			Any("error", afterErr),
 		)
 	}
 

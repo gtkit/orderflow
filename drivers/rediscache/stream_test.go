@@ -1,9 +1,7 @@
 package rediscache
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -249,18 +247,31 @@ func TestStream_NilClientReturnsError(t *testing.T) {
 	})
 }
 
+// recordingLogger 实现 orderflow.Logger 接口，把每次 Error 调用记入计数 + 缓冲区。
+type recordingLogger struct {
+	errCalls int
+	lastMsg  string
+}
+
+func (l *recordingLogger) Debug(context.Context, string, ...orderflow.Field) {}
+func (l *recordingLogger) Info(context.Context, string, ...orderflow.Field)  {}
+func (l *recordingLogger) Warn(context.Context, string, ...orderflow.Field)  {}
+func (l *recordingLogger) Error(_ context.Context, msg string, _ ...orderflow.Field) {
+	l.errCalls++
+	l.lastMsg = msg
+}
+
 func TestStream_ForwardLogsRecoveredPanic(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	rec := &recordingLogger{}
 	sub := &subscription{
-		logger: logger,
+		logger: rec,
 		done:   make(chan struct{}),
 		events: make(chan orderflow.OrderStatus, 1),
 	}
 
 	sub.forward(context.Background())
 
-	if got := buf.String(); got == "" {
-		t.Fatal("expected recovered panic to be logged")
+	if rec.errCalls == 0 {
+		t.Fatal("expected recovered panic to be logged via Logger.Error")
 	}
 }

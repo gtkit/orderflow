@@ -2,7 +2,6 @@ package orderflow
 
 import (
 	"context"
-	"log/slog"
 	"time"
 )
 
@@ -86,10 +85,10 @@ func (nopObserver) Duration(context.Context, string, time.Duration, error)   {}
 // 对 nopObserver 不包装（零开销路径保持原样）。
 type safeObserver struct {
 	inner  Observer
-	logger *slog.Logger
+	logger Logger
 }
 
-func wrapObserver(inner Observer, logger *slog.Logger) Observer {
+func wrapObserver(inner Observer, logger Logger) Observer {
 	if _, ok := inner.(nopObserver); ok {
 		return inner
 	}
@@ -102,10 +101,10 @@ func wrapObserver(inner Observer, logger *slog.Logger) Observer {
 func (s *safeObserver) Event(ctx context.Context, kind EventKind, orderNo string, attrs map[string]any) {
 	defer func() {
 		if r := recover(); r != nil && s.logger != nil {
-			s.logger.ErrorContext(ctx, "orderflow: observer.Event panic recovered",
-				slog.String("event_kind", string(kind)),
-				slog.String("order_no", orderNo),
-				slog.Any("panic", r),
+			s.logger.Error(ctx, "orderflow: observer.Event panic recovered",
+				String("event_kind", string(kind)),
+				String("order_no", orderNo),
+				Any("panic", r),
 			)
 		}
 	}()
@@ -115,9 +114,9 @@ func (s *safeObserver) Event(ctx context.Context, kind EventKind, orderNo string
 func (s *safeObserver) Duration(ctx context.Context, op string, d time.Duration, err error) {
 	defer func() {
 		if r := recover(); r != nil && s.logger != nil {
-			s.logger.ErrorContext(ctx, "orderflow: observer.Duration panic recovered",
-				slog.String("op", op),
-				slog.Any("panic", r),
+			s.logger.Error(ctx, "orderflow: observer.Duration panic recovered",
+				String("op", op),
+				Any("panic", r),
 			)
 		}
 	}()
