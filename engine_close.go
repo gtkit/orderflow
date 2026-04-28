@@ -111,7 +111,20 @@ func (e *Engine[O]) CloseByUser(ctx context.Context, userID int64, orderNo strin
 // 适用场景：管理员后台"强制取消"、风控系统"异常订单关闭"、客服处理用户申诉。
 // 与 Close 的差异：不检查 order.ExpireAt() 是否到期——未过期的 Pending 订单也能直接关。
 //
-// 仍然保留的安全约束：
+// # ⚠ 调用方鉴权强约束
+//
+// **本方法名字里的 "Admin" 仅表示"绕过过期校验 + 流水标记 admin actor"，不代表
+// Engine 帮你校验调用者身份**。Engine 不知道"谁是 admin"——这是业务侧的概念。
+//
+// 调用方**必须**在调用前完成身份校验（JWT / Session 解析 + RBAC 判断），并且把这个
+// 接口**仅暴露给受信任的内部路径**（管理后台、风控系统、客服工单后端）：
+//
+//   - ❌ 禁止：直接绑到对外的 HTTP 路由 `/api/orders/{no}/close-by-admin`（非 admin
+//     用户能直接调用 → 普通用户也能强制关单）
+//   - ✅ 推荐：放在仅运维 IP 白名单可达的内网 endpoint，前置鉴权 middleware 校验
+//     `claims.role == "admin" || claims.role == "ops" || claims.role == "cs"`
+//
+// 仍然保留的库内安全约束：
 //   - 仅 Pending 订单可被关闭（Paid/Delivered 状态调用本方法返回 nil 跳过，避免误关已支付订单）；
 //   - 网关 CloseOrder 仍会被调用 + 重试；
 //   - 状态推送、流水、OnClosed 钩子全部触发，actor 标记为 admin。

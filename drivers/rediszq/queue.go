@@ -169,7 +169,14 @@ func New(rdb RedisClient, key string, opts ...Option) (*Queue, error) {
 	return queue, nil
 }
 
-// MustNew 创建延迟队列，初始化失败时 panic。仅推荐在 bootstrap 启动阶段使用。
+// MustNew 创建延迟队列，初始化失败时 panic。
+//
+// **仅限 init() / main() 启动阶段使用**——配置错误时让进程启动失败比返回 error
+// 更明确（与 stdlib 的 `regexp.MustCompile` / `template.Must` 同模式）。
+//
+// **运行时禁用**（请求处理路径、goroutine 内、定时任务里）：运行时调用 panic
+// 会冲破业务主流程，违反库代码"零 panic"约束。需要在运行时构造时使用 New 并显式
+// 处理 error。
 func MustNew(rdb RedisClient, key string, opts ...Option) *Queue {
 	queue, err := New(rdb, key, opts...)
 	if err != nil {

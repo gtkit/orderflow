@@ -33,8 +33,11 @@ func defaultGenerateOrderNo() string {
 	ms, seq := advanceOrderNoState()
 
 	var randBuf [2]byte
-	// Go 1.24+ crypto/rand.Read 永远返回 nil err（失败即 panic）；这里显式 panic 作为
-	// "契约失败"的兜底——若未来工具链违反假设，立即暴露而不是静默生成弱订单号。
+	// ⚠ STDLIB CONTRACT GUARD（AGENTS.md 允许的 panic 例外）：
+	// Go 1.24+ crypto/rand.Read 的契约是"永远返回 nil err"（失败时它在 stdlib 内部
+	// 自己 panic）。这里的 panic 是**契约失败兜底**——若未来 stdlib 违反承诺把 err
+	// 透出来，宁可立即崩溃也不要静默生成弱熵订单号（弱订单号会污染对账与防重）。
+	// 触发概率近似 0；不要把这条路径误认为业务 panic。
 	if _, err := rand.Read(randBuf[:]); err != nil {
 		panic(fmt.Errorf("orderflow: crypto/rand.Read failed: %w", err))
 	}
@@ -87,6 +90,10 @@ func advanceOrderNoState() (ms, seq uint64) {
 // 另一种合法选择，但不应是默认。
 func defaultGenerateOrderToken(_ string, _ int64, _ uint64) string {
 	var buf [16]byte
+	// ⚠ STDLIB CONTRACT GUARD（AGENTS.md 允许的 panic 例外）：
+	// 同 defaultGenerateOrderNo——`crypto/rand.Read` 契约是"绝不返回 err"。这里的
+	// panic 是契约失败兜底，避免静默生成弱熵 token（会让 PollStatus / Subscribe 鉴权
+	// 沦为摆设）。触发概率近似 0；不要误认为业务 panic。
 	if _, err := rand.Read(buf[:]); err != nil {
 		panic(fmt.Errorf("orderflow: crypto/rand.Read failed: %w", err))
 	}

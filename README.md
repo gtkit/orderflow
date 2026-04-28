@@ -172,6 +172,10 @@ store, err := gormstore.New[*myorder.Order, myorder.Order](gormstore.Config[*myo
         OrderToken: "order_token",
         UserID:     "user_id",
         Status:     "status",
+        // ChannelID 是 opt-in 的：显式填写后 FinalizePaidOrder 会自动回查
+        // 该列补到 bill.channel_id，让"按渠道对账"开箱可用。
+        // 业务订单表无此列时**必须留空**——空字符串语义为"未配置"，跳过回查。
+        // ChannelID: "channel_id",
     },
 
     // 可选：FinalizeExtra 让你在 FinalizePaidOrder 的事务内插入业务扩展写入
@@ -189,6 +193,16 @@ if err != nil {
 **不用 GORM？** 实现 `Store[O]` 的 14 个方法即可。重点注意：
 - 三个 CAS 方法返回 `(int64, error)`——`int64` 是 affected 行数，0 表示并发抢先推进了状态；
 - `FinalizePaidOrder` 必须在**同一个事务**里把订单置为 Delivered + 写账单（+ 业务扩展），防止"订单已履约但账单缺失"。
+
+**首次接入快捷迁移**：`gormstore` 提供 `AutoMigrate` 帮你建内置 bill / log 表（业务订单表仍由你自管）：
+
+```go
+if err := gormstore.AutoMigrate(db, "order_bills", "order_logs"); err != nil {
+    log.Fatal(err)
+}
+```
+
+业务订单表的必备索引清单见 [`drivers/gormstore/doc.go`](./drivers/gormstore/doc.go) 包注释——`(status, expire_at)`、`(status, paid_at)`、`(user_id, product_id, status)` 等不可省略，否则 fallback worker 会全表扫描。
 
 ### Step 3 — 接入 `PaymentGateway`（支付网关）
 
@@ -332,11 +346,17 @@ import "github.com/gtkit/orderflow/worker"
 go worker.StartAll(ctx, engine)
 
 // 自定义节奏
-go worker.StartAllWithOptions(ctx, engine, worker.Options{
+opts := worker.Options{
     Close:            worker.CloseOptions{PollInterval: 2 * time.Second, MaxWorkers: 32},
     CloseFallback:    worker.CloseFallbackOptions{Interval: 10 * time.Minute},
     DeliveryFallback: worker.DeliveryFallbackOptions{Interval: 30 * time.Second},
-})
+}
+// 可选：发布前预检 CloseOptions 字段间合理性（PollLease >= 2*CloseTimeout 等）。
+// NewCloseWorker 内部也会自动检查并输出 WARN 日志，但不阻断启动。
+if err := opts.Close.Validate(); err != nil {
+    log.Fatalf("invalid worker options: %v", err)
+}
+go worker.StartAllWithOptions(ctx, engine, opts)
 ```
 
 三个 worker 的职责：
@@ -750,6 +770,150 @@ _ = cache.Delete(ctx, orderToken)
 ```
 
 orderflow 库本身**不内置黑名单**——保持中立，把策略交给业务侧。如果只用第 1 步（不做黑名单），下一次 PollStatus 回源 DB 后会重新填充缓存——撤销只是临时止血。彻底撤销需要持久化标记。
+
+---
+
+## 运维 / 后台 API
+
+### `Engine.Healthy(ctx)` —— K8s readiness probe / 启动自检
+
+聚合探测 Store / Cache / Stream / DelayQueue / Locker 五个依赖，任一失败即返回非 nil error（带依赖名前缀）。依赖能力可选实现 `orderflow.Healther` 接口（含 `Ping(ctx) error`）即可被探测，未实现的跳过。
+
+```go
+http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+    ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+    defer cancel()
+    if err := engine.Healthy(ctx); err != nil {
+        http.Error(w, err.Error(), http.StatusServiceUnavailable)
+        return
+    }
+    w.WriteHeader(http.StatusOK)
+})
+```
+
+`Gateway` 默认不探测——网关健康语义多变（白名单 IP、签名密钥），由业务侧在网关 driver 内自行实现。
+
+### `Engine.CloseByAdmin(ctx, orderNo, reason)` —— 强制关单
+
+适用于风控规则触发、客服工单处理、后台运营强关。**绕过 ExpireAt 守卫**——未到期的 Pending 订单也能直接关闭。
+
+⚠ **调用方鉴权强约束**：API 名字里的 "Admin" 仅表示"绕过过期校验 + 流水标记 admin actor"，**Engine 不做身份校验**。调用方必须自己完成 RBAC 判断，并把此接口**仅绑定到运维内网 / 鉴权 middleware 之后的路径**——直接暴露给对外路由（如 `POST /api/orders/{no}/close-by-admin`）等于让普通用户也能强制关单。
+
+保留的库内安全约束：
+- 仅 Pending 订单可被关闭（Paid/Delivered 状态调用直接 skip，避免误关已支付订单）；
+- 网关 `CloseOrder` 仍然被调用 + 重试；
+- 状态推送、流水、`OnClosed` 钩子全部触发，actor 标记为 `admin`，reason 写入流水 remark。
+
+```go
+// 风控规则命中
+if err := engine.CloseByAdmin(ctx, orderNo, "fraud:rule-42"); err != nil {
+    return err
+}
+
+// 客服工单
+_ = engine.CloseByAdmin(ctx, orderNo, fmt.Sprintf("ticket:%d", ticketID))
+```
+
+`reason` 留空也合法——但建议传业务定义的"规则 ID / 工单号"以便事后审计。
+
+---
+
+## 上线前清单（必读必做）
+
+库代码本身已具备生产可用性，但以下 10 项是**业务方部署前必须完成**的工作——不做会让"看起来正常运行"的系统在真实流量下暴露漏洞或性能问题。建议作为 release 前的 checklist 逐条核对。
+
+### 1. 建 DB 索引
+
+按 [`drivers/gormstore/doc.go`](./drivers/gormstore/doc.go) 包注释的"必备索引清单"建索引：`(status, expire_at)`、`(status, paid_at)`、`(user_id, product_id, status)` 等不可省略，否则 fallback worker 与查询路径会全表扫描。
+
+### 2. 建议加部分唯一索引（"一用户一商品一 Pending"DB 兜底）
+
+```sql
+-- PostgreSQL
+CREATE UNIQUE INDEX uk_user_product_pending ON orders (user_id, product_id) WHERE status = 1;
+-- MySQL: 用生成列 + 普通唯一索引模拟
+```
+
+这是"前端 debounce + 应用层 Locker + DB 兜底"三层防御里的最后一道，确保任何代码 bug 都不能让同用户同商品出现两个 Pending。
+
+### 3. API 网关层做 per-IP / per-user 速率限制
+
+`PollStatus` / `Subscribe` 没有内置限流——这是 API 网关 / 反代（Nginx `limit_conn` / `limit_req`、Cloudflare、Envoy）的标准能力。配置后即可挡住单用户大量长连接耗尽 Redis 连接池的风险。
+
+### 4. 业务方实现的 `OnPaid` 钩子必须幂等
+
+支付回调可能重复推送、`DeliveryFallback` 会扫到 `OnPaid` 失败的订单重试——同一订单的 `OnPaid` 多次调用必须产生相同副作用。强烈推荐用 [`drivers/rediscache.IdempotentOnPaidViaRedis`](./drivers/rediscache/locker.go) 包装：
+
+```go
+cfg.OnPaid = rediscache.IdempotentOnPaidViaRedis(myOnPaid, rdb, "orderflow:onpaid:", 24*time.Hour)
+```
+
+### 5. 注入 `Config.ResolveChannel` + `Config.BuildNotifyURL`
+
+默认实现把 `PayMethod` 直接当 `Channel` + 用 `url.PathEscape` 拼路径。生产应注入定制实现：白名单校验 PayMethod + 拼完整域名的 NotifyURL：
+
+```go
+cfg.ResolveChannel = func(pm string) orderflow.Channel {
+    switch pm {
+    case "wechat_app", "wechat_h5": return "wechat"
+    case "alipay_app", "alipay_h5": return "alipay"
+    default: panic("unknown pay method: " + pm) // 业务侧应在更早一步拒绝
+    }
+}
+cfg.BuildNotifyURL = func(ch orderflow.Channel) string {
+    return "https://api.yourdomain.com/payment/notify/" + url.PathEscape(string(ch))
+}
+```
+
+### 6. `CloseByAdmin` 仅暴露在鉴权 middleware 之后的内网路径
+
+API 名字里的 "Admin" **不代表** Engine 帮你校验身份。直接绑到对外路由 `POST /api/orders/{no}/close-by-admin` 等于让所有用户都能强制关单。**正确做法**：放在仅运维 IP 白名单可达的内网 endpoint，前置 RBAC middleware 校验 `claims.role` 在 `admin / ops / cs` 之内。
+
+### 7. 配 `Config.Locker`
+
+```go
+cfg.Locker = rediscache.NewLocker(rdb)
+cfg.CreateLockTTL = 10 * time.Second
+```
+
+注入后 `Engine.Create` 会按 `(user_id, product_id)` 串行化，避免并发下单产生多个 Pending。配合 #2 的 DB 部分唯一索引兜底。
+
+⚠ **生产 HA 提示**：`drivers/rediscache.Locker` 基于单实例 `SET NX EX`——Redis 主从异步复制下故障切换瞬间可能"双客户端持同一锁"，对一致性敏感的场景应改用 [redsync](https://github.com/go-redsync/redsync) 跑多实例 Redlock。详见 [`drivers/rediscache/locker.go`](./drivers/rediscache/locker.go) GoDoc。
+
+### 8. 配 `Engine.Healthy` 到 K8s readiness probe
+
+```go
+http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+    ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+    defer cancel()
+    if err := engine.Healthy(ctx); err != nil {
+        http.Error(w, err.Error(), http.StatusServiceUnavailable)
+        return
+    }
+    w.WriteHeader(http.StatusOK)
+})
+```
+
+依赖能力故障时 K8s 自动剔除流量，避免请求落到坏 pod 上失败堆积。
+
+### 9. 接 Observer 到监控
+
+实现 `orderflow.Observer` 把 `Event` / `Duration` 翻译成 Prometheus counter / histogram（或 OpenTelemetry span）。**重点告警** `EventAnomaly` 系列——尤其是：
+
+- `kind=hook_panic`：业务钩子 panic（被 recover 但需修 bug）
+- `kind=append_log_failed`：流水写入失败（合规风险）
+- `kind=publish_status_cache_inconsistent`：缓存与状态不一致（用户可能轮询到错误状态）
+- `kind=poll_cache_get_failed`：缓存抖动（即将打爆 DB）
+
+详见 [`observer.go`](./observer.go) `EventKind` 与 `AnomalyKind` 列表。
+
+### 10. 启动 `worker.StartAll`
+
+```go
+go worker.StartAll(ctx, engine)  // 三个 worker 一次起：CloseWorker / CloseFallback / DeliveryFallback
+```
+
+三者缺一不可：`CloseWorker` 消费延时队列（主路径）、`CloseFallback` 兜底 Redis 数据丢失、`DeliveryFallback` 兜底 OnPaid 失败。生产部署时建议每个微服务实例都跑——它们靠 `ReserveExpired` 的原子租约协调，不需要 leader election。
 
 ---
 
