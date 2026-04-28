@@ -5,6 +5,20 @@
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [1.2.0] - 2026-04-28
+
+### Added
 - `Engine.Healthy(ctx)` 健康检查：依赖能力可选实现 `orderflow.Healther` 接口（含 `Ping(ctx) error`）即可被聚合探测，用于 K8s readiness probe / 启动自检
 - `Engine.CloseByAdmin(ctx, orderNo, reason)` 强制关单 API：**绕过 ExpireAt 守卫**，但仍然只对 `Pending` 订单生效；适用于风控 / 客服强制取消，actor 标记为 `admin`，reason 写入流水
 - `worker.CloseOptions.Validate()` 字段间合理性校验：`PollLease >= 2*CloseTimeout` 避免任务在 lease 过期前没处理完被另一实例重抢；`AckTimeout < CloseTimeout` 防止配置反转。`NewCloseWorker` 启动期自动 WARN 日志，但不阻断启动
@@ -36,14 +50,9 @@
 - `chaos_test.go` 场景 5 注释更新：明确"未配 Locker 时存在该限制"，此前描述滞后于 v1.0.0 引入的 `Config.Locker`
 - `drivers/{paymgrgw,rediscache,rediszq}` 各自补全 `go.sum` 中 `github.com/gtkit/orderflow` 条目，让 `GOWORK=off go test ./...` 在消费者侧能正常编译运行（之前需要 workspace 才能跑通）
 - AGENTS.md / CLAUDE.md "零 panic" 行为底线明确两类允许例外：①stdlib 契约失败兜底（如 `crypto/rand.Read`）；②bootstrap-only `Must*` 构造器。`ordernum.go` 两处 `panic` 注释加 `STDLIB CONTRACT GUARD` 醒目标识；`drivers/rediszq.MustNew` GoDoc 增加"运行时禁用"警告
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
+- `CloseByAdmin` GoDoc + README 强化"调用方鉴权"约束：API 名字里的 "Admin" 仅表示绕过过期校验 + 流水标记，**Engine 不做身份校验**——业务方必须自己做 RBAC + 仅暴露在内网鉴权 middleware 之后的路径
+- `drivers/rediszq.MustNew` GoDoc 删除虚假 stdlib API 引用（`http.MustNewRequest` 不存在），仅保留真实存在的 `regexp.MustCompile` / `template.Must`
+- README 新增"上线前清单（必读必做）"章节：10 项业务方部署前必须完成的工作（DB 索引 / 部分唯一索引 / 网关限流 / OnPaid 幂等 / Channel 钩子 / CloseByAdmin 鉴权 / Locker 配置 / Healthy probe / Observer 告警 / worker 启动）
 
 ## [1.1.0] - 2026-04-24
 
