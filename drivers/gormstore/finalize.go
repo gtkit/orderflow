@@ -50,16 +50,18 @@ func (s *Store[O, M]) FinalizePaidOrder(ctx context.Context, order O, bill order
 				order.OrderNo(), currentStatus.String())
 		}
 
-		billModel := buildBill(bill)
-		// 可选：在同一事务内回查 channel_id 列补到 bill 表，让"按渠道对账"开箱可用。
+		// 可选：在同一事务内回查 channel_id 列补到 bill spec，让"按渠道对账"开箱可用。
 		//
 		// 触发条件（**必须三者皆满足**）：
 		//   1. ColumnMap.ChannelID 已显式配置（非空）——opt-in，确保业务表确实有该列；
 		//   2. BillSpec.ChannelID 为零（业务方未通过自定义路径填值）；
 		//   3. 订单存在该列且可读取。
 		//
-		// 不满足时跳过 SELECT，billModel.ChannelID 保留 BillSpec 传入值（通常为 0）。
-		if s.cols.ChannelID != "" && billModel.ChannelID == 0 {
+		// 不满足时跳过 SELECT，spec.ChannelID 保留 BillSpec 传入值（通常为 0）。
+		// 回查结果合并到 spec 副本（值类型拷贝），同时传给 BillWriter 与 FinalizeExtra，
+		// 保证两处看到的 channel_id 完全一致。
+		spec := bill
+		if s.cols.ChannelID != "" && spec.ChannelID == 0 {
 			var channelID int64
 			if err := tx.Table(s.orderTable).
 				Select(s.cols.ChannelID).
@@ -68,14 +70,14 @@ func (s *Store[O, M]) FinalizePaidOrder(ctx context.Context, order O, bill order
 				Scan(&channelID).Error; err != nil {
 				return fmt.Errorf("gormstore: finalize lookup channel_id: %w", err)
 			}
-			billModel.ChannelID = channelID
+			spec.ChannelID = channelID
 		}
-		if err := tx.Table(s.billTable).Create(billModel).Error; err != nil {
-			return fmt.Errorf("gormstore: finalize insert bill: %w", err)
+		if err := s.billWriter.Write(tx, spec); err != nil {
+			return err
 		}
 
 		if s.finalizeExtra != nil {
-			if err := s.finalizeExtra(tx, order, billModel); err != nil {
+			if err := s.finalizeExtra(tx, order, spec); err != nil {
 				return fmt.Errorf("gormstore: finalize extra: %w", err)
 			}
 		}

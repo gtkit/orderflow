@@ -617,7 +617,7 @@ func TestStore_FinalizePaidOrder_RequiresPaid(t *testing.T) {
 func TestStore_FinalizePaidOrder_ExtraHookErrorRollsBack(t *testing.T) {
 	extraErr := errors.New("extra failed: vip service down")
 	s, _ := newTestStore(t, func(c *gormstore.Config[*orderRow, orderRow]) {
-		c.FinalizeExtra = func(tx *gorm.DB, _ *orderRow, _ *gormstore.OrderBill) error {
+		c.FinalizeExtra = func(tx *gorm.DB, _ *orderRow, _ orderflow.BillSpec) error {
 			return extraErr
 		}
 	})
@@ -652,13 +652,11 @@ func TestStore_FinalizePaidOrder_ExtraHookErrorRollsBack(t *testing.T) {
 func TestStore_FinalizePaidOrder_ExtraHookSeesBillInTx(t *testing.T) {
 	var seen bool
 	s, _ := newTestStore(t, func(c *gormstore.Config[*orderRow, orderRow]) {
-		c.FinalizeExtra = func(tx *gorm.DB, _ *orderRow, bill *gormstore.OrderBill) error {
-			// 钩子应该能在事务内看到刚插入的账单（按 ID 查）
-			if bill.ID == 0 {
-				return errors.New("bill.ID not populated by Create")
-			}
+		c.FinalizeExtra = func(tx *gorm.DB, _ *orderRow, bill orderflow.BillSpec) error {
+			// 钩子应该能在事务内看到刚插入的账单（按 order_no 查——BillSpec 不带主键，
+			// 但同 tx 内插入的 bill 必然能用 OrderNo 索引到）。
 			var count int64
-			if err := tx.Table("order_bills").Where("id = ?", bill.ID).Count(&count).Error; err != nil {
+			if err := tx.Table("order_bills").Where("order_no = ?", bill.OrderNo).Count(&count).Error; err != nil {
 				return err
 			}
 			if count != 1 {

@@ -4,11 +4,15 @@
 
 ## [Unreleased]
 
-⚠ **破坏性变更**：对齐下游业务参考标准，重写 `OrderStatus` 数值布局、引入两类 typed enum。本变更暂不发版（仓库无外部下游使用），代码就绪后单独走发版流程。
+⚠ **破坏性变更**：(1) 对齐下游业务参考标准，重写 `OrderStatus` 数值布局、引入两类 typed enum；(2) `gormstore` 解耦内置账单 / 流水模型，引入 `BillWriter` / `LogStore` 接口；(3) `Config.FinalizeExtra` 签名调整。本变更暂不发版（仓库无外部下游使用），代码就绪后单独走发版流程。
 
 ### Added
 - 新增 typed enum：`orderflow.PayMethod`（int8，零值=未选择，`PayMethodWechat=1` / `PayMethodAlipay=2` / `PayMethodUnion=3`），含 `String()` 中文名称
 - 新增 typed enum：`orderflow.ProductType`（int8，零值=未指定，`ProductTypeText=1` / `Course=2` / `Column=3` / `Membership=99`），含 `String()` 中文名称
+- 新增 `gormstore.BillWriter` 接口（`Write(tx *gorm.DB, spec orderflow.BillSpec) error`），可通过 `Config.BillWriter` 替换默认账单持久化逻辑
+- 新增 `gormstore.LogStore` 接口（`Append` / `List`），可通过 `Config.LogStore` 替换默认状态流水读写逻辑
+- 新增 `drivers/gormstore/migrations/0001_init.up.sql` 与 `0001_init.down.sql`，提供与默认 `ColumnMap` / `OrderBill` / `OrderLog` 对齐的标准建表脚本，文件命名兼容 `golang-migrate`
+- README 增补"自定义账单 / 流水持久化"、"建表与迁移"、"接入避坑：避免订单结构体冲突"三个章节，覆盖新项目 / 老项目 / 字段语义差异三种典型对接场景
 
 ### Changed
 - ⚠ **`OrderStatus` 全部具名常量数值变更**：`Pending` 由 `1` 改为 `0`、`Paid` 由 `2` 改为 `10`、`Delivered` 由 `3` 改为 `20`、`Completed` 由 `4` 改为 `30`、`Closed` 由 `5` 改为 `40`、`Cancelled` 由 `6` 改为 `50`。零值即 `StatusPending`，与 GORM `default:0` 行为一致
@@ -19,6 +23,9 @@
 - ⚠ **`ResolveChannelFunc` 签名由 `func(payMethod string) Channel` 改为 `func(payMethod orderflow.PayMethod) Channel`**；默认实现按 typed enum 内置映射 `Wechat -> "wechat"` / `Alipay -> "alipay"` / `Union -> "unionpay"`
 - ⚠ **`gormstore.OrderBill.PayMethod` / `ProductType`** 列类型由 `varchar(32)` 改为 `tinyint`，存 typed enum 数值
 - ⚠ `IsTerminal` 终态集合保持 `Completed` / `Closed` / `Cancelled` 三个状态（数值变更但语义不变）
+- ⚠ **`GenerateOrderNoFunc` 签名由 `func() string` 改为 `func(userID int64) string`**——默认实现忽略 userID 保持原行为；业务方可基于 userID 拼接订单号（典型场景：从 PHP 等历史系统迁移过来要求订单号前缀含用户 ID）。同步更新 `Engine.Create` 调用点（`engine_lifecycle.go`）和 `defaultGenerateOrderNo` 默认实现签名
+- ⚠ **`gormstore.Config.FinalizeExtra` 签名由 `func(tx *gorm.DB, order O, bill *gormstore.OrderBill) error` 改为 `func(tx *gorm.DB, order O, bill orderflow.BillSpec) error`**——业务侧不再依赖具体 ORM model 类型，收到的 `BillSpec` 已合并 channel_id 回查结果，与同次调用传给 `BillWriter.Write` 的实参完全一致
+- `gormstore` 内部 `FinalizePaidOrder` / `AppendLog` / `ListLogsByOrderNo` 改为通过 `BillWriter` / `LogStore` 接口调用；`Config.BillWriter` / `Config.LogStore` 零值时由 `New` 自动注入内置默认实现，行为与历史版本完全等价（错误信息措辞、事务边界、SQL 排序、channel_id 回查触发条件全部保持一致）
 
 ### Removed
 - ⚠ **删除 `StatusUnknown` 常量**——零值现在是 `StatusPending` 而非 `Unknown`

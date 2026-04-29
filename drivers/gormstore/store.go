@@ -20,10 +20,18 @@ import (
 //
 // 可选：
 //   - ColumnMap：订单表列名覆盖（零值字段走默认值）
+//   - BillWriter：自定义账单持久化实现；零值使用内置默认实现（按 OrderBill struct 写入 BillTable），
+//     业务方账单表结构与内置模型不一致时实现此接口替换。
+//   - LogStore：自定义流水持久化实现；零值使用内置默认实现（按 OrderLog struct 读写 LogTable）。
 //   - FinalizeExtra：FinalizePaidOrder 事务内的业务扩展钩子，**仅允许同事务内的
 //     DB 操作**——禁止在此发起 RPC、HTTP、消息队列等外部 IO，否则会让该订单的
 //     行锁持有时间膨胀到外部 RTT 量级，引发热点行锁堆积。外部副作用应放在
 //     OnDelivered 钩子（旁路、不阻断）或独立的事件总线消费链路。
+//     bill 参数为已合并 channel_id 回查结果的 BillSpec 副本，与同次调用传给
+//     BillWriter.Write 的实参完全一致。
+//     升级提示：v1.3.x 的旧签名收 *OrderBill，当前改为 orderflow.BillSpec
+//     中性载荷——字段名一一对应，仅 bill.ID（ORM 主键）需改为 bill.OrderNo
+//     做事务内关联。完整迁移示例与字段映射表见 README "FinalizeExtra 签名升级" 小节。
 //   - PaidUndeliveredRetryGrace：FindPaidUndelivered 的 paid_at 时间窗口下界。
 //     该值用于过滤"刚 Paid 不久、正在被正常 OnPaid 路径处理"的订单，避免
 //     DeliveryFallback 与正常路径反复抢锁导致 OnPaid 被无谓重入。零值使用默认
@@ -40,7 +48,10 @@ type Config[O orderflow.OrderSnapshot, M any] struct {
 
 	ColumnMap ColumnMap
 
-	FinalizeExtra func(tx *gorm.DB, order O, bill *OrderBill) error
+	BillWriter BillWriter
+	LogStore   LogStore
+
+	FinalizeExtra func(tx *gorm.DB, order O, bill orderflow.BillSpec) error
 
 	PaidUndeliveredRetryGrace time.Duration
 }
@@ -88,16 +99,19 @@ const defaultPaidUndeliveredRetryGrace = 60 * time.Second
 type Store[O orderflow.OrderSnapshot, M any] struct {
 	db                        *gorm.DB
 	orderTable                string
-	billTable                 string
-	logTable                  string
 	cols                      ColumnMap
 	wrap                      func(*M) O
 	buildModel                func(orderflow.OrderSpec) *M
-	finalizeExtra             func(tx *gorm.DB, order O, bill *OrderBill) error
+	billWriter                BillWriter
+	logStore                  LogStore
+	finalizeExtra             func(tx *gorm.DB, order O, bill orderflow.BillSpec) error
 	paidUndeliveredRetryGrace time.Duration
 }
 
 // New 构造 Store。参数非法时返回错误。
+//
+// Config.BillWriter / Config.LogStore 为零值时分别注入内置默认实现，行为与历史版本
+// 等价。
 func New[O orderflow.OrderSnapshot, M any](cfg Config[O, M]) (*Store[O, M], error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -106,14 +120,22 @@ func New[O orderflow.OrderSnapshot, M any](cfg Config[O, M]) (*Store[O, M], erro
 	if grace <= 0 {
 		grace = defaultPaidUndeliveredRetryGrace
 	}
+	billWriter := cfg.BillWriter
+	if billWriter == nil {
+		billWriter = newDefaultBillWriter(cfg.BillTable)
+	}
+	logStore := cfg.LogStore
+	if logStore == nil {
+		logStore = newDefaultLogStore(cfg.LogTable)
+	}
 	return &Store[O, M]{
 		db:                        cfg.DB,
 		orderTable:                cfg.OrderTable,
-		billTable:                 cfg.BillTable,
-		logTable:                  cfg.LogTable,
 		cols:                      cfg.ColumnMap.withDefaults(),
 		wrap:                      cfg.Wrap,
 		buildModel:                cfg.BuildModel,
+		billWriter:                billWriter,
+		logStore:                  logStore,
 		finalizeExtra:             cfg.FinalizeExtra,
 		paidUndeliveredRetryGrace: grace,
 	}, nil

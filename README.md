@@ -146,8 +146,8 @@ import (
 store, err := gormstore.New[*myorder.Order, myorder.Order](gormstore.Config[*myorder.Order, myorder.Order]{
     DB:         db,                  // *gorm.DB
     OrderTable: "orders",            // 业务订单表
-    BillTable:  "order_bills",       // 账单表（使用 gormstore 内置的 OrderBill 模型）
-    LogTable:   "order_logs",        // 状态流水表（使用 gormstore 内置的 OrderLog 模型）
+    BillTable:  "order_bills",       // 账单表（默认走内置 OrderBill 模型；不兼容时见"自定义账单 / 流水持久化"）
+    LogTable:   "order_logs",        // 状态流水表（默认走内置 OrderLog 模型）
 
     // 把 *M（GORM 模型指针）包装成 OrderSnapshot 实现。
     // 这里 M = myorder.Order，实现方法集挂在 *Order 上，所以 O = *myorder.Order。
@@ -180,7 +180,8 @@ store, err := gormstore.New[*myorder.Order, myorder.Order](gormstore.Config[*myo
 
     // 可选：FinalizeExtra 让你在 FinalizePaidOrder 的事务内插入业务扩展写入
     // （如激活 VIP、写积分流水）。失败会回滚整个履约事务——只放"必须和账单原子"的写入。
-    FinalizeExtra: func(tx *gorm.DB, order *myorder.Order, bill *gormstore.OrderBill) error {
+    // bill 是已合并 channel_id 回查结果的 BillSpec 副本，与同次调用传给 BillWriter 的实参一致。
+    FinalizeExtra: func(tx *gorm.DB, order *myorder.Order, bill orderflow.BillSpec) error {
         return tx.Exec("UPDATE users SET vip_expire_at = ? WHERE id = ?",
             computeVipExpireAt(order), order.UserID()).Error
     },
@@ -194,15 +195,81 @@ if err != nil {
 - 三个 CAS 方法返回 `(int64, error)`——`int64` 是 affected 行数，0 表示并发抢先推进了状态；
 - `FinalizePaidOrder` 必须在**同一个事务**里把订单置为 Delivered + 写账单（+ 业务扩展），防止"订单已履约但账单缺失"。
 
-**首次接入快捷迁移**：`gormstore` 提供 `AutoMigrate` 帮你建内置 bill / log 表（业务订单表仍由你自管）：
+### 自定义账单 / 流水持久化（可选）
+
+`gormstore` 默认按内置 `OrderBill` / `OrderLog` 模型写入 `BillTable` / `LogTable`。业务表结构与内置模型不一致时（多列 / 少列 / 类型不同 / 命名差异），实现下面两个接口替换默认实现，driver 内部 channel_id 回查与事务边界仍由 driver 负责：
 
 ```go
-if err := gormstore.AutoMigrate(db, "order_bills", "order_logs"); err != nil {
-    log.Fatal(err)
+// 自定义账单写入：在 FinalizePaidOrder 的事务内被调用，spec 已合并 channel_id 回查结果。
+type BillWriter interface {
+    Write(tx *gorm.DB, spec orderflow.BillSpec) error
+}
+
+// 自定义流水读写：AppendLog / ListLogsByOrderNo 直接委托。
+type LogStore interface {
+    Append(ctx context.Context, db *gorm.DB, entry orderflow.LogEntry) error
+    List(ctx context.Context, db *gorm.DB, orderNo string) ([]orderflow.LogEntry, error)
 }
 ```
 
+通过 `Config.BillWriter` / `Config.LogStore` 注入；零值时使用内置默认实现，行为与历史版本完全等价。
+
+#### `FinalizeExtra` 签名升级（v1.3.x → 当前）
+
+为了让 `FinalizeExtra` 不再耦合具体 ORM model（自定义 `BillWriter` 写的可能不是 `*OrderBill`），签名从收 `*gormstore.OrderBill` 改为收 `orderflow.BillSpec` 中性载荷。字段名几乎一一对应，10 行内可改完：
+
+```go
+// ❌ 旧签名（v1.3.x）
+FinalizeExtra: func(tx *gorm.DB, order *myorder.Order, bill *gormstore.OrderBill) error {
+    // 用 bill.ID 在事务内做关联查询
+    return tx.Exec(`INSERT INTO vip_grants(user_id, bill_id, expire_at) VALUES (?, ?, ?)`,
+        bill.UserID, bill.ID, computeVipExpireAt(order)).Error
+}
+
+// ✅ 新签名（当前）
+FinalizeExtra: func(tx *gorm.DB, order *myorder.Order, bill orderflow.BillSpec) error {
+    // BillSpec 不含 ORM 主键 ID——改用 OrderNo（唯一索引）做关联
+    return tx.Exec(`INSERT INTO vip_grants(user_id, order_no, expire_at) VALUES (?, ?, ?)`,
+        bill.UserID, bill.OrderNo, computeVipExpireAt(order)).Error
+}
+```
+
+字段映射对照（`BillSpec` 与 `OrderBill` 共有的字段名完全一致）：
+
+| 旧 `*OrderBill` 访问 | 新 `BillSpec` 访问 | 说明 |
+| --- | --- | --- |
+| `bill.UserID` / `bill.OrderNo` / `bill.TradeNo` | 完全相同 | 字段名 1:1 对应 |
+| `bill.ProductID` / `bill.ProductType` / `bill.ProductTitle` | 完全相同 | |
+| `bill.OriginalPrice` / `bill.DiscountAmount` / `bill.PayAmount` | 完全相同 | |
+| `bill.PayMethod` / `bill.PayChannel` / `bill.ChannelID` | 完全相同 | `ChannelID` 已合并 driver 回查结果 |
+| `bill.PaidAt` | 完全相同 | |
+| `bill.ID`（GORM 主键回填） | **改用 `bill.OrderNo`** | `BillSpec` 是中性载荷不含主键，订单号是唯一索引 |
+| `bill.CreatedAt`（默认实现写入时设 `time.Now()`） | 改用 `time.Now()` 自取或读 `bill.PaidAt` | `BillSpec` 不含 `CreatedAt` |
+
+`drivers/gormstore/gormstore_test.go` 里的 `TestStore_FinalizePaidOrder_ExtraHookSeesBillInTx` 演示了"在事务内用 `bill.OrderNo` 查刚写入的账单"的迁移写法，可作为模板。
+
+### 建表与迁移
+
+**新项目**：直接执行 [`drivers/gormstore/migrations/0001_init.up.sql`](./drivers/gormstore/migrations/0001_init.up.sql)，覆盖 orders / order_bills / order_logs 三张标准表。文件命名兼容 `golang-migrate`：
+
+```bash
+migrate -path ./drivers/gormstore/migrations -database "$DSN" up
+```
+
+**老项目（已有订单表）**：只跑 `order_bills` / `order_logs` 两张表的建表语句，业务订单表通过 `ColumnMap` 映射列名差异。
+
+**快速原型**：`gormstore.AutoMigrate(db, "order_bills", "order_logs")` 可建内置 bill / log 表（仅供本地测试，生产环境用迁移脚本）。
+
 业务订单表的必备索引清单见 [`drivers/gormstore/doc.go`](./drivers/gormstore/doc.go) 包注释——`(status, expire_at)`、`(status, paid_at)`、`(user_id, product_id, status)` 等不可省略，否则 fallback worker 会全表扫描。
+
+### 接入避坑：避免订单结构体冲突
+
+外部项目接入时常见的"订单结构体冲突"几乎都源于一个反模式：**让自家既有的 `Order` struct 同时承担"业务 domain model"和"orderflow 视角的 GORM 模型 (M)"两个角色**。推荐策略：
+
+1. **写一个 thin adapter struct（如 `OrderRow`）当 `M`**——只承担 GORM 持久化 + `OrderSnapshot` 接口实现两个职责，业务自有 `Order`（DTO / domain model）保持不动。`drivers/gormstore/gormstore_test.go` 里的 `orderRow` 就是这个模式，可作为模板。
+2. **列名差异走 `ColumnMap` 映射**——业务订单表已有的命名（`order_number` / `customer_id` / `state` 等）通过 `ColumnMap` 一次性对齐，不改业务表 schema。
+3. **字段语义差异在 adapter 内转换**——业务表用 `string` 存状态、用自己的枚举存支付方式时，在 `OrderSnapshot` 的 method 实现里做翻译（业务字符串 → `orderflow.OrderStatus` / `orderflow.PayMethod`），业务表 schema 不动。
+4. **账单 / 流水表不兼容时实现 `BillWriter` / `LogStore` 接口**（见上一节），不要 fork driver。
 
 ### Step 3 — 接入 `PaymentGateway`（支付网关）
 
