@@ -29,7 +29,10 @@ var orderNoState atomic.Uint64
 // 格式：<20 位毫秒时间戳><6 位 36 进制自增序列><4 位随机后缀>
 // 长度固定 30 位。**单机单进程下字典序 = 生成顺序**（原子 CAS 推进 (ms, seq) 整体状态）；
 // 多机部署下仅保证唯一性（靠 4 位随机后缀提供碰撞防护），字典序不严格。
-func defaultGenerateOrderNo() string {
+//
+// 入参 userID 由签名约定保留但默认实现忽略——业务方需要"订单号含 user_id"
+// 时应注入自定义 GenerateOrderNoFunc，不要依赖默认。
+func defaultGenerateOrderNo(_ int64) string {
 	ms, seq := advanceOrderNoState()
 
 	var randBuf [2]byte

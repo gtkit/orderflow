@@ -86,8 +86,16 @@ type BuildNotifyURLFunc func(ch Channel) string
 // 默认实现（Engine 未注入时）：价格一致 + 支付方式一致 -> 复用。
 type IsReusableFunc[O OrderSnapshot] func(existing O, req CreateRequest) bool
 
-// GenerateOrderNoFunc 生成订单号。默认实现基于 UTC 毫秒时间戳 + 随机后缀。
-type GenerateOrderNoFunc func() string
+// GenerateOrderNoFunc 生成订单号。
+//
+// 入参 userID 是创建本次订单的用户 ID（来自 CreateRequest.UserID，鉴权后身份）。
+// 业务方可基于 userID 拼接订单号（典型场景：从 PHP 等历史系统迁移过来要求订单号
+// 前缀含用户 ID）。默认实现忽略 userID，基于 UTC 毫秒时间戳 + 随机后缀生成。
+//
+// 调用时机：Engine.Create 在锁外、CAS 写订单表前调用一次；返回值会写入
+// OrderSpec.OrderNo（由 driver 持久化）。同一用户同一商品并发下单时（仍在
+// `(user_id, product_id)` 维度上串行），各自调用一次拿到不同订单号。
+type GenerateOrderNoFunc func(userID int64) string
 
 // GenerateOrderTokenFunc 生成订单对外暴露的 token。
 //

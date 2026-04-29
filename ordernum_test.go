@@ -8,7 +8,7 @@ import (
 )
 
 func TestDefaultGenerateOrderNo_FixedWidth(t *testing.T) {
-	no := defaultGenerateOrderNo()
+	no := defaultGenerateOrderNo(0)
 	if len(no) != 30 {
 		t.Fatalf("expected 30 chars, got %d: %q", len(no), no)
 	}
@@ -28,7 +28,7 @@ func TestDefaultGenerateOrderNo_UniqueUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx] = defaultGenerateOrderNo()
+			results[idx] = defaultGenerateOrderNo(0)
 		}(i)
 	}
 	wg.Wait()
@@ -54,7 +54,7 @@ func TestDefaultGenerateOrderNo_LexicographicOrderUnderRace(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx] = defaultGenerateOrderNo()
+			results[idx] = defaultGenerateOrderNo(0)
 		}(i)
 	}
 	wg.Wait()

@@ -6,6 +6,9 @@ import (
 	"github.com/gtkit/orderflow"
 )
 
+// OrderStatus 订单状态.
+type OrderStatus int8
+
 // OrderBill 是 gormstore 内置的账单模型。
 // 用户通过 Config.BillTable 指定表名；列定义按主流命名约定给出，必要时业务侧可建对应表结构。
 type OrderBill struct {
@@ -28,14 +31,15 @@ type OrderBill struct {
 
 // OrderLog 是 gormstore 内置的状态流水模型。
 type OrderLog struct {
-	ID         uint64                `gorm:"column:id;primaryKey;autoIncrement"`
-	OrderNo    string                `gorm:"column:order_no;type:varchar(64);not null;index"`
-	UserID     int64                 `gorm:"column:user_id;not null;index"`
-	FromStatus orderflow.OrderStatus `gorm:"column:from_status;type:tinyint;not null"`
-	ToStatus   orderflow.OrderStatus `gorm:"column:to_status;type:tinyint;not null"`
-	Actor      string                `gorm:"column:actor;type:varchar(64);not null;default:''"`
-	Remark     string                `gorm:"column:remark;type:varchar(512);not null;default:''"`
-	CreatedAt  time.Time             `gorm:"column:created_at;not null"`
+	ID         int64                 `gorm:"column:id;primaryKey;autoIncrement;comment:主键ID" json:"id"`
+	CreatedAt  time.Time             `gorm:"column:created_at;not null;comment:创建时间" json:"created_at"`
+	OrderID    uint64                `gorm:"column:order_id;not null;index:idx_order_id;comment:订单ID" json:"order_id"`
+	OrderNo    string                `gorm:"column:order_no;type:varchar(64);not null;comment:订单编号" json:"order_no"`
+	UserID     int64                 `gorm:"column:user_id;not null;comment:用户ID" json:"user_id"`
+	FromStatus orderflow.OrderStatus `gorm:"column:from_status;type:tinyint;not null;comment:变更前状态" json:"from_status"`
+	ToStatus   orderflow.OrderStatus `gorm:"column:to_status;type:tinyint;not null;comment:变更后状态" json:"to_status"`
+	Actor      string                `gorm:"column:actor;type:varchar(64);not null;default:'system';comment:操作人 system/user/admin:用户名" json:"actor"`
+	Remark     string                `gorm:"column:remark;type:varchar(512);not null;default:'';comment:操作备注" json:"remark"`
 }
 
 // buildBill 把 orderflow.BillSpec 转成内置 OrderBill 模型。

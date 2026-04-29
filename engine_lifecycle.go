@@ -116,7 +116,7 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 		}
 	}
 
-	orderNo := e.generateOrderNo()
+	orderNo := e.generateOrderNo(req.UserID)
 	orderToken := e.generateOrderToken(orderNo, req.UserID, req.Product.ID)
 	expireAt := time.Now().Add(e.orderExpire)
 
