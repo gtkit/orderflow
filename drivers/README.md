@@ -1,6 +1,6 @@
 # orderflow drivers
 
-`drivers/` 目录存放 orderflow 能力接口（`Store` / `PaymentGateway` / `DelayQueue` / `StatusCache` / `StatusStream`）的默认实现。
+`drivers/` 目录存放 orderflow 能力接口（`Store` / `PaymentGateway` / `DelayQueue` / `StatusCache` / `StatusStream`）的默认实现。**所有 driver 接收调用方提供的基础设施实例（`*gorm.DB` / `*redis.Client` / `*paymgr.Manager`），不在内部创建连接**——详见主 README 的「基础设施契约」。
 
 ## 模块边界设计
 

@@ -7,6 +7,7 @@
 ### Added
 
 ### Changed
+- 文档：README 顶部明确库的适用场景边界（单商品虚拟交付订单：数字内容 / 虚拟商品 / 会员权益 + 中国大陆主流三方支付）与基础设施契约（调用方负责创建并注入 `*gorm.DB` / `*redis.Client` / `*paymgr.Manager` 等实例，库不在内部创建连接），不再做通用订单引擎承诺；`drivers/README.md` 同步补充"接收外部实例"声明
 
 ### Deprecated
 
