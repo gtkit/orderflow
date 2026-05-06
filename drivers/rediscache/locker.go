@@ -51,6 +51,7 @@ var releaseLockScript = redis.NewScript(`
 type Locker struct {
 	rdb       *redis.Client
 	keyPrefix string
+	logger    orderflow.Logger
 }
 
 // LockerOption 配置 Locker。
@@ -61,11 +62,25 @@ func WithLockerKeyPrefix(prefix string) LockerOption {
 	return func(l *Locker) { l.keyPrefix = prefix }
 }
 
+// WithLockerLogger 注入 logger 用于上报 unlock 失败等运行时异常。
+//
+// 不注入时使用 nopLogger（吞掉所有日志）。生产建议至少注入业务侧 logger 包装，
+// 便于在 Redis 故障期间感知"unlock 失败 → 锁卡到 TTL 才释放 → 同 user 同 product
+// 无法下单"这类业务影响。
+func WithLockerLogger(logger orderflow.Logger) LockerOption {
+	return func(l *Locker) {
+		if logger != nil {
+			l.logger = logger
+		}
+	}
+}
+
 // NewLocker 构造 Redis Locker。rdb 必填。
 func NewLocker(rdb *redis.Client, opts ...LockerOption) *Locker {
 	l := &Locker{
 		rdb:       rdb,
 		keyPrefix: defaultLockerKeyPrefix,
+		logger:    nopLogger{},
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -122,7 +137,15 @@ func (l *Locker) TryLock(ctx context.Context, key string, ttl time.Duration) (fu
 		// 用独立 ctx，避免父 ctx 取消后 unlock 被跳过导致锁卡到 TTL 才释放
 		rctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_, _ = releaseLockScript.Run(rctx, l.rdb, []string{fullKey}, token).Result()
+		// unlock 失败时锁会卡到 TTL 才自动释放，期间同 key 无法重新加锁。
+		// Lua 脚本返回 redis.Nil 是正常情况（token 已不匹配 → 锁已被自然过期 + 他人接手）；
+		// 其他错误属于 Redis 故障，必须上报让监控感知"潜在锁泄漏"。
+		if _, err := releaseLockScript.Run(rctx, l.rdb, []string{fullKey}, token).Result(); err != nil && !errors.Is(err, redis.Nil) {
+			l.logger.Error(rctx, "rediscache/locker: unlock failed, lock will linger until TTL",
+				orderflow.String("key", fullKey),
+				orderflow.Any("error", err),
+			)
+		}
 	}
 	return unlock, true, nil
 }

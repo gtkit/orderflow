@@ -45,7 +45,7 @@ func NewStatusStream(rdb *redis.Client, opts ...StreamOption) *StatusStream {
 	s := &StatusStream{
 		rdb:       rdb,
 		keyPrefix: defaultStreamKeyPrefix,
-		logger:    nopStreamLogger{},
+		logger:    nopLogger{},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -53,14 +53,15 @@ func NewStatusStream(rdb *redis.Client, opts ...StreamOption) *StatusStream {
 	return s
 }
 
-// nopStreamLogger 是 orderflow.Logger 的零开销默认实现。
-// 业务方未注入 WithStreamLogger 时，subscription 的 panic recover 等日志被丢弃。
-type nopStreamLogger struct{}
+// nopLogger 是 orderflow.Logger 的零开销默认实现，被 StatusStream 与 Locker 共用。
+// 业务方未注入 WithStreamLogger / WithLockerLogger 时，driver 内的 panic recover、
+// unlock 失败等日志被丢弃。
+type nopLogger struct{}
 
-func (nopStreamLogger) Debug(context.Context, string, ...orderflow.Field) {}
-func (nopStreamLogger) Info(context.Context, string, ...orderflow.Field)  {}
-func (nopStreamLogger) Warn(context.Context, string, ...orderflow.Field)  {}
-func (nopStreamLogger) Error(context.Context, string, ...orderflow.Field) {}
+func (nopLogger) Debug(context.Context, string, ...orderflow.Field) {}
+func (nopLogger) Info(context.Context, string, ...orderflow.Field)  {}
+func (nopLogger) Warn(context.Context, string, ...orderflow.Field)  {}
+func (nopLogger) Error(context.Context, string, ...orderflow.Field) {}
 
 var _ orderflow.StatusStream = (*StatusStream)(nil)
 
