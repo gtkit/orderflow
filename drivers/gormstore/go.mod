@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/glebarez/sqlite v1.11.0
-	github.com/gtkit/orderflow v1.5.0
+	github.com/gtkit/orderflow v1.6.0
 	gorm.io/gorm v1.31.1
 )
 
