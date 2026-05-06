@@ -5,6 +5,23 @@
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [1.5.0] - 2026-05-06
+
+> 本版本聚焦**订单生命周期审计后的加固与文档对齐**，无破坏性变更。
+> 子模块同步发版：`drivers/gormstore/v1.2.1`、`drivers/rediscache/v1.1.0`、`drivers/rediszq/v1.0.3`。
+
+### Added
 - 新增 `AnomalyDelayQueueCleanupFailed` 异常类别（`events.go`），用于上报"已支付订单清理延时关单队列残留失败"——订单状态正确，但 `CloseWorker` 会二次拉取做幂等 skip，污染 close 路径事件 / 日志；通过此 anomaly 让监控感知 Redis / Queue 子系统可用性
 - `drivers/rediscache`：新增 `WithLockerLogger` Option，允许业务方注入 `orderflow.Logger` 让 `Locker.unlock` 失败能进入统一日志采集链路；不注入时使用包内 nop 实现保持向后兼容
 
