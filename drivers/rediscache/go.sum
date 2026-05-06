@@ -10,6 +10,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/gtkit/orderflow v1.4.0 h1:pOSGsGkKMRmsLX9m5+LfnbDtI+5OdRkI7HERwfoJtrg=
 github.com/gtkit/orderflow v1.4.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
+github.com/gtkit/orderflow v1.5.0 h1:pG4IDxaGfyPF0ryiimDsVq2y5IfgFhEkuFkzdtf5DmY=
+github.com/gtkit/orderflow v1.5.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
 github.com/klauspost/cpuid/v2 v2.2.10 h1:tBs3QSyvjDyFTq3uoc/9xFpCuOsJQFNPiAhYdw2skhE=
 github.com/klauspost/cpuid/v2 v2.2.10/go.mod h1:hqwkgyIinND0mEev00jJYCxPNVRVXFQeu1XKlok6oO0=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
