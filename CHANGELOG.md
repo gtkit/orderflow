@@ -16,6 +16,35 @@
 
 ### Security
 
+## [1.6.0] - 2026-05-06
+
+⚠ **破坏性变更**（按 v1.4.0 先例：仓库当前无外部下游引用，仍按 v1 内 MINOR 升级 + 显式 BREAKING 标识发布；下游接入前请阅读以下条目）：(1) `Store.CASConfirmPaid` / `Store.CASReopenPaid` 接口签名末尾加 `expectedAmount int64` 参数；(2) `Store` 接口新增 `CASCancel(orderNo) (int64, error)` 方法。
+
+> 子模块同步发版：`drivers/gormstore/v1.3.0`、`drivers/rediscache/v1.1.2`、`drivers/rediszq/v1.0.5`、`drivers/paymgrgw/v1.1.3`。
+
+### Added
+- 新增 `Engine.CancelByUser(ctx, userID, orderNo, reason) error` 实装"用户主动取消"语义——推进 Pending 订单到 `StatusCancelled`（区别于 `CloseByUser` 走 `StatusClosed`），绕过 `ExpireAt` 守卫直接取消未过期订单。流程：身份校验 → 网关 `CloseOrder` → `CASCancel` → publishStatus → appendLog → `EventOrderCancelled` → `OnCancelled` 钩子
+- 新增 `OnCancelledHook[O]` 钩子（`Engine.Config.OnCancelled`），与 `OnClosed` 分工——前者覆盖用户主动取消、后者覆盖系统型关闭
+- 新增 `EventOrderCancelled` 观察事件
+- 新增 `OpCancel` 操作名常量供 `Observer.Duration` 使用
+- `drivers/gormstore`：`ColumnMap` 新增 `PayAmount` 字段（零值默认 `"pay_amount"`），用于 CAS 路径的金额二级校验
+- `drivers/gormstore`：`Store.CASCancel(orderNo)` 实现（GORM 路径）
+- 测试覆盖：`TestCancelByUser_*` 系列、`TestCASConfirmPaid_RejectsAmountMismatch`、`TestStore_CASCancel_*`
+
+### Changed
+- ⚠ **`Store.CASConfirmPaid` / `Store.CASReopenPaid` 接口签名变更**：末尾加 `expectedAmount int64` 参数。driver 必须在 CAS `WHERE` 子句加 `pay_amount = ?` 二级校验——错金额的支付回调即使绕过上游 `amount-mismatch` 校验也无法在此处推进状态。`engine_notify.go` 调用点透传 `order.PayAmount()` 作为 `expectedAmount`；下游自定义 Store 实现需同步签名 + WHERE 子句
+- ⚠ **`Store` 接口新增 `CASCancel(orderNo) (int64, error)` 方法**——下游自定义 Store 实现需补此方法（gormstore 已实现）
+- `OnPaidHook` GoDoc 增补"想要事务内原子 DB 操作？"段落，明确指向 driver 的事务内钩子（如 `gormstore.Config.FinalizeExtra`），并把"事务内本地 DB 操作"与"外部 API 副作用"两条路径的分工写成速查表，避免业务方误把外部副作用塞进 `OnPaid` 后陷入"事务持锁过长 + 已发请求不可回滚"困境
+- `StatusCancelled` GoDoc 改写：移除 v1.5.0 时加的"当前版本未实装写入路径"标注，改为正式的"用户型终止 vs 系统型终止"语义边界说明
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [1.5.0] - 2026-05-06
 
 > 本版本聚焦**订单生命周期审计后的加固与文档对齐**，无破坏性变更。
