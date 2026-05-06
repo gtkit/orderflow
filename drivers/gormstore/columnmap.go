@@ -26,6 +26,8 @@ type ColumnMap struct {
 	DeliveredAt string
 	ExpireAt    string
 	UpdatedAt   string
+	// PayAmount 列名（用于 CAS 路径的金额二级校验）。零值走默认 "pay_amount"。
+	PayAmount string
 	// ChannelID 是 opt-in 的业务渠道维度列名。
 	//
 	// 与其他列不同，**ChannelID 没有默认值**——必须由业务方显式设置（如 "channel_id"）
@@ -58,6 +60,7 @@ func (c ColumnMap) validate() error {
 		{"DeliveredAt", c.DeliveredAt},
 		{"ExpireAt", c.ExpireAt},
 		{"UpdatedAt", c.UpdatedAt},
+		{"PayAmount", c.PayAmount},
 		{"ChannelID", c.ChannelID},
 	}
 	for _, f := range fields {
@@ -101,6 +104,9 @@ func (c ColumnMap) withDefaults() ColumnMap {
 	}
 	if c.UpdatedAt == "" {
 		c.UpdatedAt = "updated_at"
+	}
+	if c.PayAmount == "" {
+		c.PayAmount = "pay_amount"
 	}
 	// 注意：ChannelID 故意不设默认值——空字符串表示"业务未启用渠道回查"。
 	// 设默认 "channel_id" 会让没有该列的业务表 finalize 失败（破坏性变更）。

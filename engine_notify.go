@@ -87,7 +87,7 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 		return nil
 	}
 
-	affected, err := e.store.CASConfirmPaid(ctx, notify.OutTradeNo, notify.TransactionID, notify.PaidAt)
+	affected, err := e.store.CASConfirmPaid(ctx, notify.OutTradeNo, notify.TransactionID, notify.PaidAt, order.PayAmount())
 	if err != nil {
 		return fmt.Errorf("orderflow: cas confirm paid: %w", err)
 	}
@@ -206,7 +206,7 @@ func (e *Engine[O]) handleClosedPaidNotify(ctx context.Context, order O, notify 
 		return nil
 	}
 
-	affected, err := e.store.CASReopenPaid(ctx, order.OrderNo(), query.TransactionID, query.PaidAt)
+	affected, err := e.store.CASReopenPaid(ctx, order.OrderNo(), query.TransactionID, query.PaidAt, order.PayAmount())
 	if err != nil {
 		e.recordAnomaly(ctx, order, AnomalyUnexpectedStatus, "cas reopen failed: "+err.Error())
 		return nil

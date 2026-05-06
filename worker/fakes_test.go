@@ -133,10 +133,13 @@ func (s *fakeStore) CASClose(_ context.Context, orderNo string) (int64, error) {
 	o.status = orderflow.StatusClosed
 	return 1, nil
 }
-func (s *fakeStore) CASConfirmPaid(_ context.Context, _, _ string, _ time.Time) (int64, error) {
+func (s *fakeStore) CASCancel(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
-func (s *fakeStore) CASReopenPaid(_ context.Context, _, _ string, _ time.Time) (int64, error) {
+func (s *fakeStore) CASConfirmPaid(_ context.Context, _, _ string, _ time.Time, _ int64) (int64, error) {
+	return 0, nil
+}
+func (s *fakeStore) CASReopenPaid(_ context.Context, _, _ string, _ time.Time, _ int64) (int64, error) {
 	return 0, nil
 }
 func (s *fakeStore) FinalizePaidOrder(_ context.Context, order *testOrder, bill orderflow.BillSpec) error {

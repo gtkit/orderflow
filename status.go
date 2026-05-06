@@ -31,13 +31,17 @@ const (
 	// StatusClosed 因主动关闭、系统异常或支付超时而终结。
 	// 关闭原因（含 timeout）通过 ClosedReason 区分，详见 events.go。
 	StatusClosed OrderStatus = 40
-	// StatusCancelled 用户主动取消。
+	// StatusCancelled 用户主动取消（CancelByUser 推进路径，与 StatusClosed 区分）。
 	//
-	// **当前版本未实装写入路径**：Engine 没有 Cancel API，CloseByUser / CloseByAdmin
-	// 都把订单推进到 StatusClosed（用 ClosedReason 区分原因）。本常量与 CanTransitionTo
-	// 中的 Pending → Cancelled 跃迁规则**预留给后续 Cancel API**，业务方在当前版本
-	// 不应通过自定义 Store 实现绕过 Engine 写入此状态——Engine 内的 PollStatus / 通知
-	// 路径并未针对该状态做完整覆盖。
+	// 与 StatusClosed 的语义边界：
+	//
+	//   - StatusClosed：系统型终止（支付超时、管理员强制关闭 CloseByAdmin、被新订单
+	//     取代关闭、入延时队列失败兜底）。原因通过 ClosedReason 区分。
+	//   - StatusCancelled：用户型终止（用户主动放弃支付，调用 CancelByUser）。
+	//     原因通过 CancelByUser 入参的 reason 字符串区分（业务自定义文案）。
+	//
+	// 状态机仅允许 Pending → Cancelled，业务方应通过 Engine.CancelByUser 推进，
+	// 不要绕过 Engine 直接写入此状态。
 	StatusCancelled OrderStatus = 50
 )
 

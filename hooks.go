@@ -20,6 +20,19 @@ type OnCreatedHook[O OrderSnapshot] func(ctx context.Context, order O) error
 // 时会再次调用本钩子。业务方**必须**自行做幂等去重，否则会双倍发放（推荐用
 // `rediscache.IdempotentOnPaidViaRedis` 包装本钩子，或注入业务侧自有的幂等表）。
 //
+// **想要事务内原子 DB 操作？**用 driver 提供的事务内钩子，**不要**塞进 OnPaid。
+// 例如 `gormstore.Config.FinalizeExtra`：在 `FinalizePaidOrder` 同事务内调用，
+// 接收 `*gorm.DB` 事务句柄，与订单状态推进、账单写入一起原子化。典型场景：更新
+// `user_membership` 到期时间、扣减 `inventory` 库存、写入业务侧 audit 表等本地
+// DB 副作用。OnPaid 只适合处理**天生不能在事务内执行**的副作用——外部 HTTP API
+// （发短信 / 推送 / 第三方权益系统）会让事务持锁时间不可控，且外部失败时事务回滚
+// 但已发请求无法回滚（这就是为什么 OnPaid 必须自己做幂等而不是依赖事务）。
+//
+// 速查：
+//
+//	事务内本地 DB 操作      → driver 的 FinalizeExtra（强一致，失败回滚）
+//	外部 API / 跨系统副作用 → OnPaid + 自带幂等保护（最终一致，失败重试）
+//
 // **同步执行约束**：钩子必须在返回前完成所有副作用。Engine 在钩子返回 nil 时认为履约
 // 已成功并推进状态（Paid → Delivered），返回 error 时触发补偿重试。钩子内部如果启动
 // 子 goroutine 做异步 I/O 并立即返回 nil，会导致：
@@ -57,6 +70,20 @@ type OnDeliveredHook[O OrderSnapshot] func(ctx context.Context, order O) error
 
 // OnClosedHook 订单关闭后触发。reason 给出关闭原因。
 type OnClosedHook[O OrderSnapshot] func(ctx context.Context, order O, reason ClosedReason)
+
+// OnCancelledHook 订单被用户主动取消后触发（CancelByUser 推进的 StatusCancelled 路径）。
+//
+// 与 OnClosed 的区别：
+//
+//   - OnClosed：订单进入 StatusClosed（系统超时 / 管理员强制 / 被新订单取代 / 入队失败兜底）；
+//   - OnCancelled：订单进入 StatusCancelled（用户主动放弃支付）。
+//
+// 业务侧关心"用户操作型订单终止"时实现本钩子（如重新发起 Pending 订单的引导、向用户征集
+// 取消理由的反馈表单等）；关心"系统型订单终止"时实现 OnClosed。
+//
+// reason 是 CancelByUser 调用方传入的业务原因（如 "user_cancelled" / "switch_payment"），
+// Engine 不解析它，仅原样转发到本钩子与 audit log。
+type OnCancelledHook[O OrderSnapshot] func(ctx context.Context, order O, reason string)
 
 // OnReopenedHook 已关闭的订单被支付网关确认成功、经 CASReopenPaid 恢复后触发。
 //

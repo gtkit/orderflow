@@ -341,3 +341,108 @@ func TestClampLimit(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// CancelByUser
+// =============================================================================
+
+func TestCancelByUser_HappyPath(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	env.store.seed(&testOrder{
+		orderNo:    "C-1",
+		orderToken: "TC-1",
+		userID:     1001,
+		status:     StatusPending,
+		payMethod:  PayMethodWechat,
+		expireAt:   time.Now().Add(time.Hour), // 未过期也能取消
+	})
+
+	mustNotErr(t, env.engine.CancelByUser(ctx, 1001, "C-1", "switch_payment"), "CancelByUser")
+
+	mustEqual(t, env.store.byNo["C-1"].status, StatusCancelled, "final status")
+	mustEqual(t, env.gw.CloseOrderCalls, 1, "Gateway.CloseOrder")
+	mustEqual(t, env.store.CASCancelCalls, 1, "CASCancel calls")
+	mustEqual(t, env.store.AppendLogCalls, 1, "AppendLog calls")
+	mustEqual(t, env.store.logs[0].ToStatus, StatusCancelled, "log ToStatus")
+	mustEqual(t, env.store.logs[0].Actor, "user", "log actor")
+
+	mustEqual(t, env.cache.SetCalls, 1, "cache Set")
+	mustEqual(t, env.cache.SetHistory[0].Status, StatusCancelled, "cache status")
+	mustLen(t, env.stream.Published, 1, "stream published")
+	mustEqual(t, env.stream.Published[0].Status, StatusCancelled, "stream status")
+
+	mustLen(t, env.OnCancelledCalls, 1, "OnCancelled hook")
+	mustEqual(t, env.OnCancelledCalls[0].Reason, "switch_payment", "reason transparent")
+	mustLen(t, env.OnClosedCalls, 0, "OnClosed must NOT fire on cancel path")
+}
+
+func TestCancelByUser_RejectsForeignUser(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo: "C-2",
+		userID:  1001,
+		status:  StatusPending,
+	})
+
+	err := env.engine.CancelByUser(context.Background(), 9999, "C-2", "")
+	if !errors.Is(err, ErrOrderForbidden) {
+		t.Fatalf("CancelByUser foreign user: got %v, want ErrOrderForbidden", err)
+	}
+
+	mustEqual(t, env.store.CASCancelCalls, 0, "no CAS")
+	mustEqual(t, env.gw.CloseOrderCalls, 0, "no gateway close")
+	mustLen(t, env.OnCancelledCalls, 0, "no hook")
+}
+
+func TestCancelByUser_NotFound(t *testing.T) {
+	env := newTestEnv(t)
+	err := env.engine.CancelByUser(context.Background(), 1001, "UNKNOWN", "")
+	if !errors.Is(err, ErrOrderNotFound) {
+		t.Fatalf("CancelByUser not found: got %v, want ErrOrderNotFound", err)
+	}
+}
+
+func TestCancelByUser_SkipsNonPending(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo: "C-3",
+		userID:  1001,
+		status:  StatusPaid, // 已支付，不能再取消
+	})
+
+	mustNotErr(t, env.engine.CancelByUser(context.Background(), 1001, "C-3", ""), "CancelByUser paid")
+
+	mustEqual(t, env.store.byNo["C-3"].status, StatusPaid, "status unchanged")
+	mustEqual(t, env.store.CASCancelCalls, 0, "no CAS on paid")
+	mustEqual(t, env.gw.CloseOrderCalls, 0, "no gateway on paid")
+	mustLen(t, env.OnCancelledCalls, 0, "no hook on paid")
+}
+
+// =============================================================================
+// CASConfirmPaid 二级金额校验（fakeStore 模拟 DB 列值）
+// =============================================================================
+
+func TestCASConfirmPaid_RejectsAmountMismatch(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:   "A-1",
+		userID:    1001,
+		status:    StatusPending,
+		payAmount: 9900, // DB 上是 9900
+		expireAt:  time.Now().Add(time.Hour),
+	})
+
+	// 错金额：CAS 应返回 affected=0，订单仍在 Pending
+	affected, err := env.store.CASConfirmPaid(context.Background(), "A-1", "TXN-WRONG", time.Now(), 1234)
+	mustNotErr(t, err, "CASConfirmPaid")
+	mustEqual(t, affected, int64(0), "affected for amount mismatch")
+	mustEqual(t, env.store.byNo["A-1"].status, StatusPending, "status unchanged")
+
+	// 对金额：CAS 推进
+	affected, err = env.store.CASConfirmPaid(context.Background(), "A-1", "TXN-OK", time.Now(), 9900)
+	mustNotErr(t, err, "CASConfirmPaid match")
+	mustEqual(t, affected, int64(1), "affected for matching amount")
+	mustEqual(t, env.store.byNo["A-1"].status, StatusPaid, "status advanced")
+}

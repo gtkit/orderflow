@@ -77,7 +77,7 @@ func TestChaos_ConcurrentHandleNotify_DifferentOrders(t *testing.T) {
 
 			// 直接调内部 finalize 链路——跳过 ParseNotify 的 fakeGateway 竞态
 			// 这样真实测了 Engine 的状态机 + Store + Cache + hooks 在并发下的正确性
-			if _, err := env.store.CASConfirmPaid(context.Background(), notify.OutTradeNo, notify.TransactionID, notify.PaidAt); err != nil {
+			if _, err := env.store.CASConfirmPaid(context.Background(), notify.OutTradeNo, notify.TransactionID, notify.PaidAt, notify.TotalAmount); err != nil {
 				errCount.Add(1)
 				return
 			}

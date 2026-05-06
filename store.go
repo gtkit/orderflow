@@ -31,10 +31,21 @@ type Store[O OrderSnapshot] interface {
 
 	// CASClose 将 Pending 订单原子推进到 Closed。
 	CASClose(ctx context.Context, orderNo string) (int64, error)
+	// CASCancel 将 Pending 订单原子推进到 Cancelled（用户主动取消语义）。
+	// 与 CASClose 区别：终态值不同（StatusCancelled vs StatusClosed），
+	// 业务侧通过状态值区分"用户主动放弃"与"系统超时关闭/管理员关闭"。
+	CASCancel(ctx context.Context, orderNo string) (int64, error)
 	// CASConfirmPaid 将 Pending 订单原子推进到 Paid，并写入交易号和支付时间。
-	CASConfirmPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time) (int64, error)
+	//
+	// expectedAmount 是订单登记的应付金额（来自 OrderSnapshot.PayAmount()），
+	// driver 必须把它加入 CAS WHERE 子句作为二级金额校验——只有 DB 当前
+	// pay_amount 列值与 expectedAmount 严格相等时才推进状态。这保证了即使上游
+	// 的 amount-mismatch 校验被绕过、或 DB 中的 pay_amount 列被外部修改，错金额
+	// 的支付回调也无法把订单推进到 Paid。
+	CASConfirmPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time, expectedAmount int64) (int64, error)
 	// CASReopenPaid 将已 Closed 的订单恢复到 Paid（适用于"本地已关闭但支付网关已扣款"的竞态）。
-	CASReopenPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time) (int64, error)
+	// expectedAmount 语义同 CASConfirmPaid（强制二级金额校验）。
+	CASReopenPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time, expectedAmount int64) (int64, error)
 
 	// ----- 履约：订单状态推进到 Delivered 并写入账单，需要在同一事务内完成 -----
 	//

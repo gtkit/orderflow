@@ -54,6 +54,8 @@ const (
 	EventOrderDelivered EventKind = "order_delivered"
 	// EventOrderClosed 订单因超时 / 主动关闭 / 取代等进入 Closed。
 	EventOrderClosed EventKind = "order_closed"
+	// EventOrderCancelled 订单被用户主动取消进入 Cancelled（CancelByUser 路径）。
+	EventOrderCancelled EventKind = "order_cancelled"
 	// EventOrderReopened "Closed 后又被网关确认已支付"的恢复路径。
 	EventOrderReopened EventKind = "order_reopened"
 	// EventAnomaly 订单异常（金额不符 / 交易号不符 / 意外状态等）。
@@ -65,6 +67,7 @@ const (
 	OpCreate        = "Create"
 	OpHandleNotify  = "HandleNotify"
 	OpClose         = "Close"
+	OpCancel        = "Cancel"
 	OpReconcilePaid = "ReconcilePaid"
 	OpPollStatus    = "PollStatus"
 )

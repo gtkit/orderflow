@@ -76,6 +76,7 @@ type fakeStore struct {
 	// Call counters
 	CreateCalls         int
 	CASCloseCalls       int
+	CASCancelCalls      int
 	CASConfirmPaidCalls int
 	CASReopenPaidCalls  int
 	FinalizeCalls       int
@@ -271,7 +272,22 @@ func (s *fakeStore) CASClose(_ context.Context, orderNo string) (int64, error) {
 	return 1, nil
 }
 
-func (s *fakeStore) CASConfirmPaid(_ context.Context, orderNo, tradeNo string, paidAt time.Time) (int64, error) {
+func (s *fakeStore) CASCancel(_ context.Context, orderNo string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CASCancelCalls++
+	if s.ErrOnCAS != nil {
+		return 0, s.ErrOnCAS
+	}
+	o, ok := s.byNo[orderNo]
+	if !ok || o.status != StatusPending {
+		return 0, nil
+	}
+	o.status = StatusCancelled
+	return 1, nil
+}
+
+func (s *fakeStore) CASConfirmPaid(_ context.Context, orderNo, tradeNo string, paidAt time.Time, expectedAmount int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.CASConfirmPaidCalls++
@@ -307,6 +323,10 @@ func (s *fakeStore) CASConfirmPaid(_ context.Context, orderNo, tradeNo string, p
 	if !ok || o.status != StatusPending {
 		return 0, nil
 	}
+	// 二级金额校验：DB 层 pay_amount 必须与 expected 严格相等。
+	if o.payAmount != expectedAmount {
+		return 0, nil
+	}
 	o.status = StatusPaid
 	o.tradeNo = tradeNo
 	cp := paidAt
@@ -314,7 +334,7 @@ func (s *fakeStore) CASConfirmPaid(_ context.Context, orderNo, tradeNo string, p
 	return 1, nil
 }
 
-func (s *fakeStore) CASReopenPaid(_ context.Context, orderNo, tradeNo string, paidAt time.Time) (int64, error) {
+func (s *fakeStore) CASReopenPaid(_ context.Context, orderNo, tradeNo string, paidAt time.Time, expectedAmount int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.CASReopenPaidCalls++
@@ -329,6 +349,9 @@ func (s *fakeStore) CASReopenPaid(_ context.Context, orderNo, tradeNo string, pa
 	}
 	o, ok := s.byNo[orderNo]
 	if !ok || o.status != StatusClosed {
+		return 0, nil
+	}
+	if o.payAmount != expectedAmount {
 		return 0, nil
 	}
 	o.status = StatusPaid
@@ -660,6 +683,11 @@ type onClosedCall struct {
 	Reason  ClosedReason
 }
 
+type onCancelledCall struct {
+	OrderNo string
+	Reason  string
+}
+
 type onSupersededCall struct {
 	OldOrderNo   string
 	NewProductID uint64
@@ -686,6 +714,7 @@ type testEnv struct {
 	OnPaidCalls       []onPaidCall
 	OnDeliveredCalls  []string
 	OnClosedCalls     []onClosedCall
+	OnCancelledCalls  []onCancelledCall
 	OnReopenedCalls   []string
 	OnSupersededCalls []onSupersededCall
 	OnAnomalyCalls    []onAnomalyCall
@@ -735,6 +764,11 @@ func newTestEnv(t testing.TB) *testEnv {
 		OnClosed: func(_ context.Context, o *testOrder, reason ClosedReason) {
 			env.mu.Lock()
 			env.OnClosedCalls = append(env.OnClosedCalls, onClosedCall{o.OrderNo(), reason})
+			env.mu.Unlock()
+		},
+		OnCancelled: func(_ context.Context, o *testOrder, reason string) {
+			env.mu.Lock()
+			env.OnCancelledCalls = append(env.OnCancelledCalls, onCancelledCall{o.OrderNo(), reason})
 			env.mu.Unlock()
 		},
 		OnReopened: func(_ context.Context, o *testOrder, _ NotifyResult) {

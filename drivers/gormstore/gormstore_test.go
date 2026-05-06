@@ -343,7 +343,7 @@ func TestStore_FindPendingByUserAndProduct(t *testing.T) {
 	}
 
 	// 把订单推进到 Paid，再查应该 miss（仅返回 Pending）
-	_, err = s.CASConfirmPaid(ctx, "P1", "TXN", time.Now())
+	_, err = s.CASConfirmPaid(ctx, "P1", "TXN", time.Now(), 1)
 	if err != nil {
 		t.Fatalf("CASConfirmPaid: %v", err)
 	}
@@ -482,6 +482,57 @@ func TestStore_CASClose_PendingToClosed(t *testing.T) {
 	}
 }
 
+func TestStore_CASCancel_PendingToCancelled(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	seedOrder(t, s, &orderRow{
+		OrderNoCol: "N", OrderTokenCol: "T", UserIDCol: 1, ProductIDCol: 1,
+		StatusCol: orderflow.StatusPending, ExpireAtCol: time.Now().Add(time.Hour),
+		PayAmountCol: 1, OriginalPriceCol: 1,
+	})
+
+	affected, err := s.CASCancel(ctx, "N")
+	if err != nil {
+		t.Fatalf("CASCancel: %v", err)
+	}
+	if affected != 1 {
+		t.Fatalf("affected = %d, want 1", affected)
+	}
+
+	got, _, _ := s.GetByNo(ctx, "N")
+	if got.StatusCol != orderflow.StatusCancelled {
+		t.Errorf("status = %v, want Cancelled", got.StatusCol)
+	}
+
+	// 再次 CAS 应返回 0（已经不是 Pending）
+	affected, err = s.CASCancel(ctx, "N")
+	if err != nil {
+		t.Fatalf("CASCancel second: %v", err)
+	}
+	if affected != 0 {
+		t.Errorf("second CAS affected = %d, want 0", affected)
+	}
+}
+
+func TestStore_CASCancel_RejectsNonPending(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	seedOrder(t, s, &orderRow{
+		OrderNoCol: "N", OrderTokenCol: "T", UserIDCol: 1, ProductIDCol: 1,
+		StatusCol: orderflow.StatusPaid, ExpireAtCol: time.Now().Add(time.Hour),
+		PayAmountCol: 1, OriginalPriceCol: 1,
+	})
+
+	affected, _ := s.CASCancel(ctx, "N")
+	if affected != 0 {
+		t.Errorf("CASCancel on Paid: affected = %d, want 0", affected)
+	}
+	got, _, _ := s.GetByNo(ctx, "N")
+	if got.StatusCol != orderflow.StatusPaid {
+		t.Errorf("status changed: got %v, want Paid", got.StatusCol)
+	}
+}
+
 func TestStore_CASConfirmPaid(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
@@ -492,7 +543,7 @@ func TestStore_CASConfirmPaid(t *testing.T) {
 	})
 
 	paidAt := time.Now().Truncate(time.Second)
-	affected, err := s.CASConfirmPaid(ctx, "N", "TXN-123", paidAt)
+	affected, err := s.CASConfirmPaid(ctx, "N", "TXN-123", paidAt, 1)
 	if err != nil {
 		t.Fatalf("CASConfirmPaid: %v", err)
 	}
@@ -512,9 +563,24 @@ func TestStore_CASConfirmPaid(t *testing.T) {
 	}
 
 	// 不是 Pending 时 CAS 返回 0
-	affected, _ = s.CASConfirmPaid(ctx, "N", "TXN-456", time.Now())
+	affected, _ = s.CASConfirmPaid(ctx, "N", "TXN-456", time.Now(), 1)
 	if affected != 0 {
 		t.Errorf("second CAS affected = %d, want 0", affected)
+	}
+
+	// 金额不匹配时 CAS 也返回 0（二级金额校验）
+	seedOrder(t, s, &orderRow{
+		OrderNoCol: "N2", OrderTokenCol: "T2", UserIDCol: 1, ProductIDCol: 1,
+		StatusCol: orderflow.StatusPending, ExpireAtCol: time.Now().Add(time.Hour),
+		PayAmountCol: 9900, OriginalPriceCol: 9900,
+	})
+	affected, _ = s.CASConfirmPaid(ctx, "N2", "TXN", time.Now(), 1234)
+	if affected != 0 {
+		t.Errorf("amount mismatch CAS affected = %d, want 0", affected)
+	}
+	got2, _, _ := s.GetByNo(ctx, "N2")
+	if got2.StatusCol != orderflow.StatusPending {
+		t.Errorf("amount mismatch should leave status Pending, got %v", got2.StatusCol)
 	}
 }
 
@@ -528,7 +594,7 @@ func TestStore_CASReopenPaid(t *testing.T) {
 	})
 
 	// Pending 状态下 Reopen 应该失败（0 行）
-	affected, _ := s.CASReopenPaid(ctx, "N", "TXN", time.Now())
+	affected, _ := s.CASReopenPaid(ctx, "N", "TXN", time.Now(), 1)
 	if affected != 0 {
 		t.Errorf("reopen from Pending: affected = %d, want 0", affected)
 	}
@@ -536,7 +602,7 @@ func TestStore_CASReopenPaid(t *testing.T) {
 	// 先关闭
 	_, _ = s.CASClose(ctx, "N")
 	// 现在 Closed → Reopen 到 Paid
-	affected, err := s.CASReopenPaid(ctx, "N", "TXN", time.Now())
+	affected, err := s.CASReopenPaid(ctx, "N", "TXN", time.Now(), 1)
 	if err != nil {
 		t.Fatalf("CASReopenPaid: %v", err)
 	}
@@ -561,7 +627,7 @@ func TestStore_FinalizePaidOrder(t *testing.T) {
 		StatusCol: orderflow.StatusPending, ExpireAtCol: time.Now().Add(time.Hour),
 		PayAmountCol: 9900, OriginalPriceCol: 9900,
 	})
-	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now())
+	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now(), 9900)
 	order, _, _ := s.GetByNo(ctx, "N")
 
 	bill := orderflow.BillSpec{
@@ -628,7 +694,7 @@ func TestStore_FinalizePaidOrder_ExtraHookErrorRollsBack(t *testing.T) {
 		StatusCol: orderflow.StatusPending, ExpireAtCol: time.Now().Add(time.Hour),
 		PayAmountCol: 9900, OriginalPriceCol: 9900,
 	})
-	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now())
+	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now(), 9900)
 	order, _, _ := s.GetByNo(ctx, "N")
 
 	err := s.FinalizePaidOrder(ctx, order, orderflow.BillSpec{
@@ -673,7 +739,7 @@ func TestStore_FinalizePaidOrder_ExtraHookSeesBillInTx(t *testing.T) {
 		StatusCol: orderflow.StatusPending, ExpireAtCol: time.Now().Add(time.Hour),
 		PayAmountCol: 9900, OriginalPriceCol: 9900,
 	})
-	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now())
+	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now(), 9900)
 	order, _, _ := s.GetByNo(ctx, "N")
 
 	if err := s.FinalizePaidOrder(ctx, order, orderflow.BillSpec{
@@ -846,6 +912,7 @@ func TestStore_ColumnMap_CustomNames(t *testing.T) {
 			DeliveredAt: "delivered_ts",
 			ExpireAt:    "exp",
 			UpdatedAt:   "updated_ts",
+			PayAmount:   "amt",
 		},
 		Wrap: func(m *altOrderRow) *altOrderRow { return m },
 		BuildModel: func(spec orderflow.OrderSpec) *altOrderRow {
@@ -886,7 +953,7 @@ func TestStore_ColumnMap_CustomNames(t *testing.T) {
 	}
 
 	// CAS 路径也应用 custom 列名
-	affected, err := s.CASConfirmPaid(ctx, "ORD", "TXN", time.Now())
+	affected, err := s.CASConfirmPaid(ctx, "ORD", "TXN", time.Now(), 100)
 	if err != nil {
 		t.Fatalf("CASConfirmPaid: %v", err)
 	}

@@ -52,10 +52,27 @@ func (s *Store[O, M]) CASClose(ctx context.Context, orderNo string) (int64, erro
 	return result.RowsAffected, nil
 }
 
-// CASConfirmPaid 把 Pending 订单原子推进到 Paid，并写入 trade_no / paid_at。
-func (s *Store[O, M]) CASConfirmPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time) (int64, error) {
+// CASCancel 把 Pending 订单原子推进到 Cancelled（用户主动取消）。
+func (s *Store[O, M]) CASCancel(ctx context.Context, orderNo string) (int64, error) {
 	result := s.db.WithContext(ctx).Table(s.orderTable).
 		Where(s.cols.OrderNo+" = ? AND "+s.cols.Status+" = ?", orderNo, orderflow.StatusPending).
+		Updates(map[string]any{
+			s.cols.Status:    orderflow.StatusCancelled,
+			s.cols.UpdatedAt: time.Now(),
+		})
+	if result.Error != nil {
+		return 0, fmt.Errorf("gormstore: cas cancel: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
+// CASConfirmPaid 把 Pending 订单原子推进到 Paid，并写入 trade_no / paid_at。
+// WHERE 子句强制 pay_amount = expectedAmount 作为二级金额校验，错金额的支付回调
+// 即使绕过上游校验也无法在此处推进状态。
+func (s *Store[O, M]) CASConfirmPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time, expectedAmount int64) (int64, error) {
+	result := s.db.WithContext(ctx).Table(s.orderTable).
+		Where(s.cols.OrderNo+" = ? AND "+s.cols.Status+" = ? AND "+s.cols.PayAmount+" = ?",
+			orderNo, orderflow.StatusPending, expectedAmount).
 		Updates(map[string]any{
 			s.cols.Status:    orderflow.StatusPaid,
 			s.cols.TradeNo:   tradeNo,
@@ -69,9 +86,11 @@ func (s *Store[O, M]) CASConfirmPaid(ctx context.Context, orderNo, tradeNo strin
 }
 
 // CASReopenPaid 把 Closed 订单恢复为 Paid。用于"本地已关闭但网关确认已扣款"的竞态恢复。
-func (s *Store[O, M]) CASReopenPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time) (int64, error) {
+// expectedAmount 语义同 CASConfirmPaid。
+func (s *Store[O, M]) CASReopenPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time, expectedAmount int64) (int64, error) {
 	result := s.db.WithContext(ctx).Table(s.orderTable).
-		Where(s.cols.OrderNo+" = ? AND "+s.cols.Status+" = ?", orderNo, orderflow.StatusClosed).
+		Where(s.cols.OrderNo+" = ? AND "+s.cols.Status+" = ? AND "+s.cols.PayAmount+" = ?",
+			orderNo, orderflow.StatusClosed, expectedAmount).
 		Updates(map[string]any{
 			s.cols.Status:    orderflow.StatusPaid,
 			s.cols.TradeNo:   tradeNo,

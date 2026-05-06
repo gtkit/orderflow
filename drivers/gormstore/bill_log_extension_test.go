@@ -65,7 +65,7 @@ func TestStore_FinalizePaidOrder_CustomBillWriter(t *testing.T) {
 		StatusCol: orderflow.StatusPending, ExpireAtCol: time.Now().Add(time.Hour),
 		PayAmountCol: 9900, OriginalPriceCol: 9900,
 	})
-	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now())
+	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now(), 9900)
 	order, _, _ := s.GetByNo(ctx, "N")
 
 	if err := s.FinalizePaidOrder(ctx, order, orderflow.BillSpec{
@@ -113,7 +113,7 @@ func TestStore_FinalizePaidOrder_CustomBillWriter_ChannelIDPropagated(t *testing
 		PayAmountCol: 9900, OriginalPriceCol: 9900,
 		ChannelIDCol: 42,
 	})
-	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now())
+	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now(), 9900)
 	order, _, _ := s.GetByNo(ctx, "N")
 
 	// BillSpec.ChannelID 故意传 0 触发 driver 回查
@@ -142,7 +142,7 @@ func TestStore_FinalizePaidOrder_CustomBillWriter_ErrorRollsBack(t *testing.T) {
 		StatusCol: orderflow.StatusPending, ExpireAtCol: time.Now().Add(time.Hour),
 		PayAmountCol: 9900, OriginalPriceCol: 9900,
 	})
-	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now())
+	_, _ = s.CASConfirmPaid(ctx, "N", "TXN", time.Now(), 9900)
 	order, _, _ := s.GetByNo(ctx, "N")
 
 	err := s.FinalizePaidOrder(ctx, order, orderflow.BillSpec{

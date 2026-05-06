@@ -46,6 +46,7 @@ type Config[O OrderSnapshot] struct {
 	OnPaid       OnPaidHook[O]
 	OnDelivered  OnDeliveredHook[O]
 	OnClosed     OnClosedHook[O]
+	OnCancelled  OnCancelledHook[O]
 	OnReopened   OnReopenedHook[O]
 	OnSuperseded OnSupersededHook[O]
 	OnAnomaly    OnAnomalyHook[O]
@@ -106,6 +107,7 @@ type Engine[O OrderSnapshot] struct {
 	onPaid       OnPaidHook[O]
 	onDelivered  OnDeliveredHook[O]
 	onClosed     OnClosedHook[O]
+	onCancelled  OnCancelledHook[O]
 	onReopened   OnReopenedHook[O]
 	onSuperseded OnSupersededHook[O]
 	onAnomaly    OnAnomalyHook[O]
@@ -164,6 +166,7 @@ func New[O OrderSnapshot](cfg Config[O]) (*Engine[O], error) {
 		onPaid:                cfg.OnPaid,
 		onDelivered:           cfg.OnDelivered,
 		onClosed:              cfg.OnClosed,
+		onCancelled:           cfg.OnCancelled,
 		onReopened:            cfg.OnReopened,
 		onSuperseded:          cfg.OnSuperseded,
 		onAnomaly:             cfg.OnAnomaly,

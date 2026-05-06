@@ -105,6 +105,91 @@ func (e *Engine[O]) CloseByUser(ctx context.Context, userID int64, orderNo strin
 	return e.Close(ctx, orderNo)
 }
 
+// CancelByUser 让用户主动**取消**自己的未支付订单，状态推进到 StatusCancelled。
+//
+// 与 CloseByUser 的语义差异：
+//
+//   - CloseByUser：用户调用"关闭未过期订单"——内部走 Close 流程，未过期会 skip，
+//     成功路径推进到 StatusClosed（与系统超时关闭混在一起）。
+//   - CancelByUser：用户调用"主动取消订单"——绕过 ExpireAt 守卫，直接推进到
+//     StatusCancelled（与系统型关闭明确区分），便于业务侧统计"用户主动放弃支付率"
+//     等指标。
+//
+// 业务方建议把"我的订单 → 取消"按钮接到本方法；CloseByUser 主要供"关闭后台"
+// 类的偏运维场景调用（接受未过期 skip 语义）。
+//
+// 流程：
+//
+//  1. 校验 order.UserID() == userID（不匹配返回 ErrOrderForbidden）；
+//  2. 状态非 Pending 直接 skip（OrderNotFound 返回 ErrOrderNotFound）；
+//  3. 调用支付网关 CloseOrder（带重试 + 可忽略错误判断），让支付方释放预占资源；
+//  4. CASCancel 把订单从 Pending 推进到 Cancelled；
+//  5. publishStatus + appendLog + observer.Event(EventOrderCancelled) +
+//     OnCancelled 钩子。
+//
+// reason 参数会写入流水的 remark 字段，并原样传给 OnCancelled 钩子，便于业务
+// 侧针对"切换支付方式 / 价格变化重新下单 / 不想买了"等不同动机做区分统计。
+func (e *Engine[O]) CancelByUser(ctx context.Context, userID int64, orderNo, reason string) (err error) {
+	start := time.Now()
+	defer func() {
+		e.observer.Duration(ctx, OpCancel, time.Since(start), err)
+	}()
+
+	order, found, err := e.store.GetByNo(ctx, orderNo)
+	if err != nil {
+		return fmt.Errorf("orderflow: query order for CancelByUser: %w", err)
+	}
+	if !found {
+		return ErrOrderNotFound
+	}
+	if order.UserID() != userID {
+		return ErrOrderForbidden
+	}
+	if order.Status() != StatusPending {
+		e.logger.Info(ctx, "orderflow: cancel skipped: order not pending",
+			String("order_no", orderNo),
+			String("status", order.Status().String()),
+		)
+		return nil
+	}
+
+	if afterErr := e.afterClose(ctx, order); afterErr != nil {
+		e.appendLog(ctx, order, StatusPending, StatusPending, "user",
+			"gateway close failed during cancel: "+afterErr.Error())
+		return fmt.Errorf("orderflow: cancel gateway close: %w", afterErr)
+	}
+
+	affected, err := e.store.CASCancel(ctx, orderNo)
+	if err != nil {
+		return fmt.Errorf("orderflow: cas cancel: %w", err)
+	}
+	if affected == 0 {
+		// 状态被并发推进——常见情形：支付回调先到、其他实例先取消。skip。
+		return nil
+	}
+
+	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusCancelled, order.ExpireAt())
+	remark := "user cancelled"
+	if reason != "" {
+		remark = "user cancelled: " + reason
+	}
+	e.appendLog(ctx, order, StatusPending, StatusCancelled, "user", remark)
+	e.observer.Event(ctx, EventOrderCancelled, order.OrderNo(), map[string]any{
+		"reason": reason,
+		"actor":  "user",
+	})
+	if e.onCancelled != nil {
+		e.safeHook(ctx, "OnCancelled", order.OrderNo(), func() {
+			e.onCancelled(ctx, order, reason)
+		})
+	}
+	e.logger.Info(ctx, "orderflow: order cancelled by user",
+		String("order_no", orderNo),
+		String("reason", reason),
+	)
+	return nil
+}
+
 // CloseByAdmin 强制关闭订单，**绕过 ExpireAt 守卫**。
 //
 // 适用场景：管理员后台"强制取消"、风控系统"异常订单关闭"、客服处理用户申诉。
