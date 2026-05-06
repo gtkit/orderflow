@@ -16,13 +16,7 @@ func TestHealthy_NoHealtherDepsReturnsNil(t *testing.T) {
 }
 
 // 注入一个会失败的 Healther，验证错误聚合。
-type pingyStore struct {
-	pingErr error
-}
-
-func (s *pingyStore) Ping(_ context.Context) error { return s.pingErr }
-
-// 这里用一个组合：把 Engine.cache 替换成实现 Healther 的 fakeCacheWithPing
+// 用 fakeCacheWithPing 把 Engine.cache 替换成实现 Healther 的实例。
 type fakeCacheWithPing struct {
 	*fakeCache
 	pingErr error

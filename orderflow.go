@@ -144,7 +144,7 @@ func New[O OrderSnapshot](cfg Config[O]) (*Engine[O], error) {
 	if genOrderToken == nil {
 		genOrderToken = defaultGenerateOrderToken
 	}
-	var logger Logger = cfg.Logger
+	logger := cfg.Logger
 	if logger == nil {
 		logger = nopLogger{}
 	}
