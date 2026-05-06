@@ -4,3 +4,5 @@ github.com/gtkit/orderflow v1.4.0 h1:pOSGsGkKMRmsLX9m5+LfnbDtI+5OdRkI7HERwfoJtrg
 github.com/gtkit/orderflow v1.4.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
 github.com/gtkit/orderflow v1.5.0 h1:pG4IDxaGfyPF0ryiimDsVq2y5IfgFhEkuFkzdtf5DmY=
 github.com/gtkit/orderflow v1.5.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
+github.com/gtkit/orderflow v1.6.0 h1:RBbrhk97/I2luvQtthvT1TCjfIsjryK+6GxcvWNyOcs=
+github.com/gtkit/orderflow v1.6.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
