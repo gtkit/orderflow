@@ -5,15 +5,26 @@
 ## [Unreleased]
 
 ### Added
+- 新增 `AnomalyDelayQueueCleanupFailed` 异常类别（`events.go`），用于上报"已支付订单清理延时关单队列残留失败"——订单状态正确，但 `CloseWorker` 会二次拉取做幂等 skip，污染 close 路径事件 / 日志；通过此 anomaly 让监控感知 Redis / Queue 子系统可用性
+- `drivers/rediscache`：新增 `WithLockerLogger` Option，允许业务方注入 `orderflow.Logger` 让 `Locker.unlock` 失败能进入统一日志采集链路；不注入时使用包内 nop 实现保持向后兼容
 
 ### Changed
 - 文档：README 顶部明确库的适用场景边界（单商品虚拟交付订单：数字内容 / 虚拟商品 / 会员权益 + 中国大陆主流三方支付）与基础设施契约（调用方负责创建并注入 `*gorm.DB` / `*redis.Client` / `*paymgr.Manager` 等实例，库不在内部创建连接），不再做通用订单引擎承诺；`drivers/README.md` 同步补充"接收外部实例"声明
+- `drivers/gormstore`：将 `migrations/0001_init.{up,down}.sql` 移动并降级为 `examples/sql/reference_schema.sql`，明确该 SQL 仅作为新项目起步参考模板（**非权威迁移**）。`gormstore` 不主动建表，业务方负责按 `ColumnMap`、自定义 GORM Model 与实际 `BillWriter` / `LogStore` 替换情况调整列名 / 类型 / 索引，建表与版本化迁移由业务方自行掌控；README "建表参考" 章节、`drivers/gormstore/doc.go` 包注释同步重写
+- `drivers/gormstore`：`AutoMigrate` GoDoc 增补"使用范围"声明，明确仅供本地测试 / 快速原型 / 集成测试容器初始化，生产环境建表与版本化迁移由业务方自行掌控；同步声明 orders 表始终由业务自建、自定义 `BillWriter` / `LogStore` 时连 bill / log 表也无需调用本函数。口径与 README "建表参考" 章节完全一致
+- `drivers/gormstore`：`reference_schema.sql` 增补"同 user 同 product 至多一条 Pending"的 DB 兜底索引建议（PostgreSQL 部分唯一索引 / MySQL 生成列方案），明确未注入 `orderflow.Locker` 时必须靠 DB 层兜底，注入 Locker 时仍推荐保留作为二级防御
+- `OnPaidHook` GoDoc 显式声明"事务边界"：钩子在 `Store.FinalizePaidOrder` 事务**之外**执行，事务回滚时业务侧已发权益不会回滚——这是导致幂等强约束的根因；同步推荐 `rediscache.IdempotentOnPaidViaRedis` 包装路径
+- `worker.DeliveryFallback` GoDoc 显式声明"无内置 max-retry / 退避"，长期失败的告警与人工介入应基于 Observer 上 `EventAnomaly + AnomalyDeliveryFailed` 的计数聚合（业务方 Prometheus / Datadog 告警阈值），库刻意不持久化 retry 计数避免引入新 schema 列
+- `StatusCancelled` GoDoc 显式标注"当前版本未实装写入路径"——`CloseByUser` / `CloseByAdmin` 都推进到 `StatusClosed` 用 `ClosedReason` 区分，本常量与 `Pending → Cancelled` 跃迁规则**预留给后续 Cancel API**；业务方在当前版本不应通过自定义 Store 绕过 Engine 写入此状态
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+- `drivers/rediszq`：`MustNew` 内部失败时 panic 信息缺包前缀（裸 `panic(err)`），不利于栈底排查；改为 `panic(fmt.Errorf("rediszq: MustNew: %w", err))`，与根包 `defaultGenerateOrderNo` 的 `crypto/rand.Read` 兜底 panic 模式对齐
+- `drivers/rediscache`：`Locker` 的 `unlock` 函数 Lua 脚本失败时原本 `_, _ = ...` 吞掉错误（锁卡到 TTL 才自动释放，期间同 user 同 product 无法重新下单且无任何日志），现在通过新增的 `WithLockerLogger` 注入的 logger 上报 ERROR 日志；`redis.Nil` 视为正常情况（锁已自然过期 + 他人接手）不上报
+- `engine_notify.go`：支付成功后 `delayQueue.Remove` 失败原本仅 Warn log，现升级为 `recordAnomaly(AnomalyDelayQueueCleanupFailed)`，让 Observer 与 OnAnomaly 钩子能感知 Queue 可用性问题
 
 ### Security
 

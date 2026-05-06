@@ -14,6 +14,12 @@ type OnCreatedHook[O OrderSnapshot] func(ctx context.Context, order O) error
 // OnPaidHook 在订单被确认支付成功、进入履约阶段时触发。
 // 典型用法：根据 order 的权益快照发放 VIP / 实物发货 / 积分入账。
 //
+// **⚠ 事务边界**：钩子在 Store.FinalizePaidOrder 的事务**之外**执行（先调 OnPaid，
+// 再开事务 finalize）。这是导致幂等约束的根因——OnPaid 已成功但 FinalizePaidOrder
+// 事务因瞬时故障回滚时，业务侧已发放的权益不会随事务回滚，DeliveryFallback 周期重入
+// 时会再次调用本钩子。业务方**必须**自行做幂等去重，否则会双倍发放（推荐用
+// `rediscache.IdempotentOnPaidViaRedis` 包装本钩子，或注入业务侧自有的幂等表）。
+//
 // **同步执行约束**：钩子必须在返回前完成所有副作用。Engine 在钩子返回 nil 时认为履约
 // 已成功并推进状态（Paid → Delivered），返回 error 时触发补偿重试。钩子内部如果启动
 // 子 goroutine 做异步 I/O 并立即返回 nil，会导致：

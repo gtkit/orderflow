@@ -32,6 +32,12 @@ const (
 	// 关闭原因（含 timeout）通过 ClosedReason 区分，详见 events.go。
 	StatusClosed OrderStatus = 40
 	// StatusCancelled 用户主动取消。
+	//
+	// **当前版本未实装写入路径**：Engine 没有 Cancel API，CloseByUser / CloseByAdmin
+	// 都把订单推进到 StatusClosed（用 ClosedReason 区分原因）。本常量与 CanTransitionTo
+	// 中的 Pending → Cancelled 跃迁规则**预留给后续 Cancel API**，业务方在当前版本
+	// 不应通过自定义 Store 实现绕过 Engine 写入此状态——Engine 内的 PollStatus / 通知
+	// 路径并未针对该状态做完整覆盖。
 	StatusCancelled OrderStatus = 50
 )
 

@@ -32,4 +32,9 @@ const (
 	AnomalyDeliveryFailed AnomalyKind = "delivery_failed"
 	// AnomalyGatewayQueryFailed 查询支付网关对账接口失败。
 	AnomalyGatewayQueryFailed AnomalyKind = "gateway_query_failed"
+	// AnomalyDelayQueueCleanupFailed 订单已支付后清理延时关单队列残留失败；
+	// 订单状态正确，但延时队列里残留的订单号会被 CloseWorker 二次拉取（CloseWorker
+	// 对 Paid 订单做幂等 skip，正确性不受影响），仍可能产生多余的 close 路径事件 / 日志，
+	// 误导监控判断。需要运维感知 Redis / Queue 子系统的可用性。
+	AnomalyDelayQueueCleanupFailed AnomalyKind = "delay_queue_cleanup_failed"
 )

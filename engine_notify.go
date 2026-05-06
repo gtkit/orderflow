@@ -108,10 +108,10 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 	})
 
 	if err := e.delayQueue.Remove(ctx, notify.OutTradeNo); err != nil {
-		e.logger.Warn(ctx, "orderflow: remove delay close failed, non-critical",
-			String("order_no", order.OrderNo()),
-			Any("error", err),
-		)
+		// 残留订单号会被 CloseWorker 二次拉取，对 Paid 订单走幂等 skip 路径不影响正确性，
+		// 但会污染 close 路径的事件 / 日志计数；通过 anomaly 让监控感知 Queue 可用性。
+		e.recordAnomaly(ctx, order, AnomalyDelayQueueCleanupFailed,
+			"remove delay close failed: "+err.Error())
 	}
 	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusPaid, order.ExpireAt())
 
