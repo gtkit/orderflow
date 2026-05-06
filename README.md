@@ -300,17 +300,15 @@ FinalizeExtra: func(tx *gorm.DB, order *myorder.Order, bill orderflow.BillSpec) 
 
 `drivers/gormstore/gormstore_test.go` 里的 `TestStore_FinalizePaidOrder_ExtraHookSeesBillInTx` 演示了"在事务内用 `bill.OrderNo` 查刚写入的账单"的迁移写法，可作为模板。
 
-### 建表与迁移
+### 建表参考
 
-**新项目**：直接执行 [`drivers/gormstore/migrations/0001_init.up.sql`](./drivers/gormstore/migrations/0001_init.up.sql)，覆盖 orders / order_bills / order_logs 三张标准表。文件命名兼容 `golang-migrate`：
+**gormstore 不主动建表，也不提供权威迁移**——orders / order_bills / order_logs 三张表的 DDL 与版本化迁移由业务方掌控。本仓库仅提供一份起步用的参考 schema：[`drivers/gormstore/examples/sql/reference_schema.sql`](./drivers/gormstore/examples/sql/reference_schema.sql)。
 
-```bash
-migrate -path ./drivers/gormstore/migrations -database "$DSN" up
-```
+**新项目**：复制参考 schema 到业务工程的迁移目录，按 `ColumnMap` 配置（或自定义 GORM Model 的 column tag）调整列名 / 类型，再用业务自带的迁移工具（`goose` / `golang-migrate` / Atlas / GORM `AutoMigrate`……任选一种）管理版本。
 
-**老项目（已有订单表）**：只跑 `order_bills` / `order_logs` 两张表的建表语句，业务订单表通过 `ColumnMap` 映射列名差异。
+**老项目（已有订单表）**：业务订单表保持不动，通过 `ColumnMap` 把列名差异映射到 driver；`order_bills` / `order_logs` 若沿用内置模型，从参考 schema 取对应段落即可。
 
-**快速原型**：`gormstore.AutoMigrate(db, "order_bills", "order_logs")` 可建内置 bill / log 表（仅供本地测试，生产环境用迁移脚本）。
+**快速原型**：`gormstore.AutoMigrate(db, "order_bills", "order_logs")` 可建内置 bill / log 表（仅覆盖 bill / log 内置表，orders 表始终由业务自建；仅供本地测试，生产环境走业务自己的迁移工具）。
 
 业务订单表的必备索引清单见 [`drivers/gormstore/doc.go`](./drivers/gormstore/doc.go) 包注释——`(status, expire_at)`、`(status, paid_at)`、`(user_id, product_id, status)` 等不可省略，否则 fallback worker 会全表扫描。
 

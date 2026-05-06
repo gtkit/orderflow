@@ -21,7 +21,9 @@
 //   - Config.ColumnMap：订单表列名映射，覆盖默认命名约定。
 //   - Config.FinalizeExtra：FinalizePaidOrder 事务内的业务侧回调（仅同 tx 内 DB 操作）。
 //
-// 标准建表脚本见 migrations/0001_init.up.sql，文件命名兼容 golang-migrate / goose。
+// 参考 schema 见 examples/sql/reference_schema.sql；该文件仅作为新项目起步模板，
+// 业务方应按 ColumnMap、自定义 GORM Model（含 column tag）以及实际 BillWriter / LogStore
+// 替换情况调整列名 / 类型 / 索引后再执行。本包不提供权威迁移，建表与版本化迁移由业务方掌控。
 //
 // # 必备索引清单
 //

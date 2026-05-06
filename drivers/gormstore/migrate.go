@@ -8,8 +8,13 @@ import (
 
 // AutoMigrate 自动建 gormstore 自带的 bill / log 表（如果不存在）。
 //
-// **不会动业务订单表**：订单表的字段和索引由业务方掌握，gormstore 没有标准
-// 模型——本 helper 只覆盖 OrderBill / OrderLog 两个内置模型。
+// **使用范围**：仅供本地测试 / 快速原型 / 集成测试容器初始化。生产环境的建表
+// 与版本化迁移由业务方自行掌控（goose / golang-migrate / Atlas / GORM 自带迁移
+// 工具任选一种），起步可参考 examples/sql/reference_schema.sql。
+//
+// **不会动业务订单表**：orders 表的字段和索引始终由业务方掌握，gormstore 没有
+// 标准订单模型——本 helper 只覆盖 OrderBill / OrderLog 两个内置模型；自定义
+// BillWriter / LogStore 时连这两张表也无需调用本函数。
 //
 // 调用方需在传 GORM 时通过 `db.Table(...)` 或者临时改 `tabler`（GORM v1）
 // 把表名改成 Config 里指定的 BillTable / LogTable。这里直接接受表名参数，
