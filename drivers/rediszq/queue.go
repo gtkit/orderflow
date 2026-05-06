@@ -180,7 +180,7 @@ func New(rdb RedisClient, key string, opts ...Option) (*Queue, error) {
 func MustNew(rdb RedisClient, key string, opts ...Option) *Queue {
 	queue, err := New(rdb, key, opts...)
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("rediszq: MustNew: %w", err))
 	}
 	return queue
 }
