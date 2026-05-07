@@ -26,8 +26,15 @@ const (
 //  5. 调用支付网关 UnifiedOrder 获取客户端拉起参数。
 //
 // 错误返回：
-//   - 入参非法（UserID / Product.ID 为 0）-> ErrInvalidConfig
+//   - 入参非法（UserID / Product.ID 为 0、Title 越界、PayMethod 缺失、Price ≤ 0、
+//     ClientIP 格式错）-> ErrInvalidConfig
 //   - Store / Gateway / DelayQueue 报错 -> 原样包装
+//
+// 关于 Product.Price 守护：库的核心语义是"用户付钱给订单"，PayAmount=0 在 UnifiedOrder /
+// notify.TotalAmount / CASConfirmPaid(expectedAmount) 链路中无意义；底层 paymgr SDK 的
+// OrderRequest.Validate 也强制 total_amount > 0。orderflow 在 Create 入口提前拒绝，
+// 避免无效副作用（DB 写入 / 延时队列入队 / 缓存写入）+ 错误归属混乱。0 元订单（赠品 /
+// 试用 / 会员体验）应由业务方在调 Engine.Create 之前 short-circuit，直接走履约路径。
 func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *CreateResult[O], err error) {
 	start := time.Now()
 	defer func() {
@@ -45,6 +52,9 @@ func (e *Engine[O]) Create(ctx context.Context, req CreateRequest) (result *Crea
 	}
 	if req.PayMethod == 0 {
 		return nil, fmt.Errorf("%w: PayMethod must be specified", ErrInvalidConfig)
+	}
+	if req.Product.Price <= 0 {
+		return nil, fmt.Errorf("%w: Product.Price must be > 0, got %d", ErrInvalidConfig, req.Product.Price)
 	}
 	if req.ClientIP != "" && net.ParseIP(req.ClientIP) == nil {
 		return nil, fmt.Errorf("%w: ClientIP %q is not a valid IP address", ErrInvalidConfig, req.ClientIP)

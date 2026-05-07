@@ -33,6 +33,13 @@ type ProductInfo struct {
 	Type  ProductType
 	Title string
 	// Price 单位：分（或业务方统一使用的最小货币单位）。
+	//
+	// 必须 > 0：Engine.Create 在入口强制校验，Price ≤ 0 直接返回 ErrInvalidConfig，
+	// 不会落库 / 入队 / 写缓存。底层 paymgr SDK 的 OrderRequest.Validate 也强制
+	// total_amount > 0，这里提前拒绝是为了避免无效副作用 + 错误归属混乱。
+	//
+	// 0 元订单（赠品 / 试用 / 会员体验等）应在业务侧 short-circuit——直接发货 / 发券 /
+	// 入会员表，不走 Engine.Create 这条"用户付钱给订单"的支付链路。
 	Price int64
 	Extra map[string]any
 }

@@ -245,6 +245,8 @@ func TestCreate_RejectsInvalidInput(t *testing.T) {
 			r.Product.Title = stringOfLen(maxCreateProductTitleLen + 1)
 		}},
 		{"PayMethod zero", func(r *CreateRequest) { r.PayMethod = 0 }},
+		{"Product.Price zero", func(r *CreateRequest) { r.Product.Price = 0 }},
+		{"Product.Price negative", func(r *CreateRequest) { r.Product.Price = -1 }},
 		{"ClientIP not a valid IP", func(r *CreateRequest) { r.ClientIP = "not-an-ip" }},
 		{"ClientIP with CRLF injection", func(r *CreateRequest) {
 			r.ClientIP = "127.0.0.1\r\nfake log entry"

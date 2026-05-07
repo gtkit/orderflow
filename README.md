@@ -568,6 +568,8 @@ func createOrderHandler(engine *orderflow.Engine[*myorder.Order]) http.HandlerFu
 }
 ```
 
+> 💡 **`Product.Price` 必须 > 0**（v1.8.0+）：`Engine.Create` 在入参校验段强制 `Product.Price > 0`，`Price <= 0` 直接返回 `ErrInvalidConfig`，不会落库 / 入队 / 写缓存。0 元订单（赠品 / 试用 / 会员体验）应在业务侧 short-circuit——直接发货 / 发券 / 入会员表，不走 `Engine.Create` 这条"用户付钱给订单"的支付链路。理由见 [CHANGELOG `[1.8.0]`](./CHANGELOG.md#180---2026-05-07)。
+
 **支付回调**：
 
 ```go
@@ -1564,7 +1566,8 @@ go worker.StartAll(ctx, engine)  // 三个 worker 一次起：CloseWorker / Clos
 - `v1.5.0`：订单生命周期审计加固（OnPaid / DeliveryFallback / StatusCancelled 文档强化；`AnomalyDelayQueueCleanupFailed` 异常类别；`rediscache.WithLockerLogger` Option），`gormstore` 标准建表脚本降级为参考 schema（`examples/sql/reference_schema.sql`）
 - `v1.6.0`：⚠ BREAKING——`Store.CASConfirmPaid` / `CASReopenPaid` 加 `expectedAmount` 二级金额校验、`Store` 接口新增 `CASCancel` 方法。新增 `Engine.CancelByUser` API + `OnCancelled` 钩子 + `EventOrderCancelled` 事件 + `gormstore.ColumnMap.PayAmount` 字段
 - `v1.6.1`：补全 v1.5 / v1.6 的对外接口文档（`CancelByUser` / `OnCancelledHook` / 自定义 Store 升级路径）
-- `v1.7.0`（**当前**）：新增退款流程的协议层抽象——`RefundGateway` 接口（5 方法）+ 4 个通用类型（`RefundRequest` / `RefundResponse` / `RefundQueryResult` / `RefundNotifyResult`）+ `RefundTradeStatus` 枚举 + `ErrRefundNotFound` sentinel；`drivers/paymgrgw.Gateway` 同时实现 `PaymentGateway` 与 `RefundGateway`。**零破坏性**——v1.6.x 用户升级无需任何代码改动。退款流程的审批、金额计算、持久化、反向核销均由调用方自行编排，详见上方「退款（自行编排）」章节
+- `v1.7.0`：新增退款流程的协议层抽象——`RefundGateway` 接口（5 方法）+ 4 个通用类型（`RefundRequest` / `RefundResponse` / `RefundQueryResult` / `RefundNotifyResult`）+ `RefundTradeStatus` 枚举 + `ErrRefundNotFound` sentinel；`drivers/paymgrgw.Gateway` 同时实现 `PaymentGateway` 与 `RefundGateway`。**零破坏性**——v1.6.x 用户升级无需任何代码改动。退款流程的审批、金额计算、持久化、反向核销均由调用方自行编排，详见上方「退款（自行编排）」章节
+- `v1.8.0`（**当前**）：⚠ BREAKING——`Engine.Create` 在入参校验段新增 `Product.Price > 0` 守护（`Price <= 0` 直接返回 `ErrInvalidConfig`，不会落库 / 入队 / 写缓存）。理由：库语义是"用户付钱给订单"，`PayAmount = 0` 在 `gateway.UnifiedOrder` / `notify.TotalAmount` / `CASConfirmPaid(expectedAmount)` 链路无意义；底层 paymgr SDK 与微信 / 支付宝两家网关均强制 `total_amount > 0`，orderflow 在入口提前拒绝避免无效副作用。0 元订单（赠品 / 试用 / 会员体验）应在业务侧 short-circuit。子模块同步发版：`drivers/gormstore/v1.3.3` / `drivers/rediscache/v1.1.5` / `drivers/rediszq/v1.0.8`
 
 发版与依赖维护规范见 [`drivers/RELEASING.md`](./drivers/RELEASING.md)。
 

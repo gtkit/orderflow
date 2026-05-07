@@ -16,6 +16,21 @@
 
 ### Security
 
+## [1.8.0] - 2026-05-07
+
+> ⚠ **破坏性变更**（按 v1.6.0 / v1.4.0 先例：仓库当前无外部下游引用，仍按 v1 内 MINOR 升级 + 显式 BREAKING 标识发布；下游接入前请阅读以下条目）：`Engine.Create` 在入参校验段新增 `Product.Price > 0` 守护，原先 `Price = 0` / `Price` 负数会一路透传到 `OrderSpec.PayAmount` 再到 `gateway.UnifiedOrder` 的伪订单链路被关闭。
+>
+> 子模块同步发版：`drivers/gormstore/v1.3.3`、`drivers/rediscache/v1.1.5`、`drivers/rediszq/v1.0.8`（仅 `require orderflow` 升级，无源码改动）。
+
+### Changed
+- ⚠ **`Engine.Create` 新增 `Product.Price > 0` 强制校验**：`Product.Price <= 0` 直接返回 `ErrInvalidConfig: Product.Price must be > 0, got <n>`，**不会落库 / 入队 / 写缓存**。理由：
+  - 库的核心语义是"用户付钱给订单"——`PayAmount = 0` 在 `gateway.UnifiedOrder` / `notify.TotalAmount` 校验 / `CASConfirmPaid(expectedAmount)` 链路中无意义
+  - 底层 `paymgr` SDK 的 `OrderRequest.Validate` 自身已强制 `total_amount > 0`（`go-pay@v1.2.1/paymgr/payment.go:86`）；微信 `total_fee` 与支付宝 `total_amount` 两家网关侧硬下限均为 1 分（0.01 元）
+  - 旧行为下 `Price = 0` 会先写 DB / 入延时队列 / 写缓存才在 gateway 层被 paymgr 拒掉，错误信息为 `paymgr.ErrInvalidParam`，归属混乱、副作用难清理
+  - 0 元订单（赠品 / 试用 / 会员体验）应在业务侧 short-circuit——直接发货 / 发券 / 入会员表，不该走"用户付钱给订单"的支付链路
+- `engine_lifecycle.go` 的 `Engine.Create` GoDoc 更新错误返回段：列举 `UserID / Product.ID / Title / PayMethod / Price / ClientIP` 全部入参校验项；新增"为什么对 Price 提前拒"的设计说明段
+- `spec.go` `ProductInfo.Price` GoDoc 补充约束：必须 > 0、0 元订单的业务侧 short-circuit 指引、与 paymgr 协议层兜底的对应关系
+
 ## [1.7.0] - 2026-05-07
 
 > 新增退款流程的协议层抽象。**零破坏性**——v1.6.x 用户升级无需任何代码改动；不接退款的项目继续运行不受影响。
