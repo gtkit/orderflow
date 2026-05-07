@@ -46,7 +46,7 @@
   3. IsIgnorableRefundError 命中走对账路径
   4. 未识别错误也尝试主动 Query 兜底（应对 driver 错误码清单不全）
   5. 按 `Status.IsTerminal()` 分支处理同步终态 / 中间态（而非硬编码渠道名）
-  6. CAS UPDATE 防重放（WHERE status IN ('pending', 'processing')）
+  6. CAS UPDATE 防终态被覆盖（WHERE status NOT IN ('succeeded', 'failed')）—— 允许 pending/processing/unknown 推进，禁止终态回退
   7. CAS winner 才触发反向核销
   8. 反向核销失败入 outbox 重试队列（`enqueueRevokeRetry`），独立 worker 重试 + 阈值告警，**不**仅日志（避免静默丢核销）
   9. ParseRefundNotify 后业务侧二次校验（channel / amount / record 存在性）防伪造 + 防错配

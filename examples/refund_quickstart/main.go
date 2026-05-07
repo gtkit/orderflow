@@ -19,7 +19,7 @@
 //  4. resp.Status.IsTerminal() 决定本地状态机走向：
 //     终态 → markResolved 触发反向核销
 //     中间态 → 推进到 status=resp.Status 等异步通知
-//  5. CAS UPDATE，WHERE status IN ('pending','processing') 防重放
+//  5. CAS UPDATE，WHERE status NOT IN ('succeeded', 'failed') 防终态被覆盖
 //  6. CAS winner 才触发反向核销；失败入 outbox 队列重试，**不**仅日志
 //  7. 异步通知路径：ParseRefundNotify → 业务校验（金额 / channel 一致性）→ CAS UPDATE → AckRefundNotify
 package main
@@ -185,7 +185,16 @@ func (s *RefundService) verifyNotify(ctx context.Context, ch orderflow.Channel, 
 
 // markResolved 是 CAS 防重放的核心：affected==1 时才触发反向核销。
 //
-// WHERE status IN ('pending','processing') 是必须的——避免重复回调让 OnRefunded 触发多次。
+// WHERE status NOT IN ('succeeded', 'failed') 表示"只要不是终态都允许覆盖"——
+// pending / processing / unknown 三个非终态都可推进，避免业务方卡在中间状态：
+//
+//   - pending → processing/succeeded/failed/unknown：合法（首次推进）
+//   - processing → succeeded/failed/unknown：合法（异步通知 / Query 推进）
+//   - unknown → processing/succeeded/failed：合法（人工介入或 Query 拉到真实状态后推进）
+//   - succeeded / failed：终态，CAS 不允许覆盖（防止误操作回退）
+//
+// 重复回调防护：终态后 affected=0；中间态间互转 affected=1 但 status != Succeeded
+// 时不会触发反向核销，行为正确。
 func (s *RefundService) markResolved(
 	ctx context.Context,
 	refundID string,
@@ -196,7 +205,7 @@ func (s *RefundService) markResolved(
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE business_refund_records
 		   SET status = ?, gateway_refund_id = ?, succeeded_at = ?
-		 WHERE id = ? AND status IN ('pending', 'processing')`,
+		 WHERE id = ? AND status NOT IN ('succeeded', 'failed')`,
 		status, gatewayRefundID, succeededAt, refundID)
 	if err != nil {
 		return err

@@ -1058,7 +1058,7 @@ var _ orderflow.RefundGateway = gateway    // 用于退款服务
 2. **事务外调 `Gateway.Refund`** —— 网络 IO 不能持锁；
 3. **`IsIgnorableRefundError` + 主动 Query 双重兜底** —— 已识别幂等错误走 reconcile；未识别错误也尝试一次 Query 兜底（应对 driver 错误码识别清单不全）；
 4. **`Status.IsTerminal()` 判断分支** —— **不要**按渠道名硬编码；用 IsTerminal 让业务代码在渠道行为变化时仍正确；
-5. **CAS UPDATE 防重放** —— `WHERE id = ? AND status IN ('pending', 'processing')`；
+5. **CAS UPDATE 防终态被覆盖** —— `WHERE id = ? AND status NOT IN ('succeeded', 'failed')`；允许从 pending / processing / unknown 推进到任何状态，但终态不可回退；
 6. **CAS winner 才触发反向核销** —— 重复回调时 `affected == 0`，跳过反向核销；
 7. **反向核销失败入 outbox 队列重试** —— **绝不能仅日志**；款项已发，权益必须回退（详见下方「反向核销失败的兜底」章节）；
 8. **ParseRefundNotify 后业务侧二次校验** —— 即便 driver 已验签，业务方仍应核对 channel / amount 与本地 record 一致（详见下方「ParseRefundNotify 后的业务校验」章节）；
@@ -1154,7 +1154,7 @@ func (s *RefundService) markResolved(ctx context.Context, refundID string,
     res, err := s.db.ExecContext(ctx,
         `UPDATE business_refund_records
            SET status = ?, gateway_refund_id = ?, succeeded_at = ?
-         WHERE id = ? AND status IN ('pending', 'processing')`,
+         WHERE id = ? AND status NOT IN ('succeeded', 'failed')`,
         status, gatewayRefundID, succeededAt, refundID)
     if err != nil {
         return err

@@ -23,7 +23,7 @@ import (
 //  2. 业务侧事务内 INSERT 退款记录（status = pending）；
 //  3. 调 Gateway.Refund(ctx, ch, req)（事务外）；
 //  4. 视返回 / IsIgnorableRefundError 决定走 CAS 落 succeeded/failed 或走 QueryRefund 兜底；
-//  5. 异步通知路径：ParseRefundNotify → CAS UPDATE（含 status IN ('pending','processing') 防重放）→ AckRefundNotify。
+//  5. 异步通知路径：ParseRefundNotify → CAS UPDATE（含 status NOT IN ('succeeded','failed') 防终态被覆盖）→ AckRefundNotify。
 //
 // # 安全契约（实现方必须遵守）
 //
