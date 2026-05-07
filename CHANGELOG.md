@@ -4,9 +4,23 @@
 
 ## [Unreleased]
 
-> 计划在下一次发版时切到 `[1.7.0]` 区段。无破坏性变更——v1.6.x 用户升级无需任何代码改动；不接退款的项目继续运行不受影响。
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [1.7.0] - 2026-05-07
+
+> 新增退款流程的协议层抽象。**零破坏性**——v1.6.x 用户升级无需任何代码改动；不接退款的项目继续运行不受影响。
 >
-> 计划联动子模块：`drivers/paymgrgw/v1.2.0`（实装 `RefundGateway`）。`drivers/gormstore` / `drivers/rediscache` / `drivers/rediszq` 本版无源码改动，**不**联动发版。
+> 子模块同步发版：`drivers/paymgrgw/v1.2.0`（实装 `RefundGateway`）。`drivers/gormstore` / `drivers/rediscache` / `drivers/rediszq` 本版无源码改动，**不**联动发版。
 
 ### Added
 - 新增 `RefundGateway` 接口（[`refund_gateway.go`](./refund_gateway.go)），包含 `Refund` / `QueryRefund` / `ParseRefundNotify` / `AckRefundNotify` / `IsIgnorableRefundError` 5 方法，与 `PaymentGateway` 并列，让一个 driver 实例可同时实现两个接口
@@ -26,12 +40,6 @@
 
 ### Fixed
 - `drivers/paymgrgw` 测试矩阵补齐：从原本只覆盖 5 个支付侧方法，扩展到覆盖全部 10 个 `Provider` 方法，消除"未触达代码"的覆盖率盲点
-
-### Deprecated
-
-### Removed
-
-### Security
 
 ## [1.6.1] - 2026-05-07
 
