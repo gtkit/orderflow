@@ -16,6 +16,20 @@
 
 ### Security
 
+## [1.6.1] - 2026-05-07
+
+> 纯文档发版：补全 v1.5.0 + v1.6.0 的 README 同步缺口，修正"对外接口变更时 README 必须同步"的发版纪律违反。无源码 / 接口 / 行为变化。
+>
+> 子模块同步发版：`drivers/gormstore/v1.3.1`、`drivers/rediscache/v1.1.3`、`drivers/rediszq/v1.0.6`、`drivers/paymgrgw/v1.1.4`（仅 require bump）。
+
+### Changed
+- README 增补「`Engine.CancelByUser`」章节（运维 / 后台 API 章节内），覆盖与 `CloseByUser` / `CloseByAdmin` 的语义边界对比表、调用方鉴权约束、HTTP handler 接入示例
+- README Step 6（接入 Locker）增补 `WithLockerLogger` 推荐注入说明（v1.5.0 引入，生产环境强烈建议）
+- README Step 7 + Step 8 增补 `OnCancelled` 钩子接入示例
+- README 「里程碑与版本」章节补全 v1.3.0 / v1.4.0 / v1.5.0 / v1.6.0 / v1.6.1 条目
+- README 新增「自定义 Store 实现的升级路径（v1.5.x → v1.6.0+）」章节，给出 `CASConfirmPaid` / `CASReopenPaid` 签名变更示例 + `CASCancel` 方法实现示例（含 SQL 模板），明确编译失败时的修复路径
+- README 新增「`gormstore` 自定义 ColumnMap 的升级路径」章节，提示用非默认列名（如 `amt`）的下游必须显式设置 `ColumnMap.PayAmount`
+
 ## [1.6.0] - 2026-05-06
 
 ⚠ **破坏性变更**（按 v1.4.0 先例：仓库当前无外部下游引用，仍按 v1 内 MINOR 升级 + 显式 BREAKING 标识发布；下游接入前请阅读以下条目）：(1) `Store.CASConfirmPaid` / `Store.CASReopenPaid` 接口签名末尾加 `expectedAmount int64` 参数；(2) `Store` 接口新增 `CASCancel(orderNo) (int64, error)` 方法。

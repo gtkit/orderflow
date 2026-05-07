@@ -376,8 +376,13 @@ stream := rediscache.NewStatusStream(rdb,
 在 `Create` 流程中对 `(user_id, product_id)` 加分布式锁，阻断并发下单产生多个 Pending。不配置时 Engine 不加锁。
 
 ```go
-locker := rediscache.NewLocker(rdb, rediscache.WithLockerKeyPrefix("orderflow:lock"))
+locker := rediscache.NewLocker(rdb,
+    rediscache.WithLockerKeyPrefix("orderflow:lock"),
+    rediscache.WithLockerLogger(orderflowLogger), // v1.5.0+ 推荐注入：unlock 失败上报 ERROR 日志
+)
 ```
+
+`WithLockerLogger` 是 v1.5.0 新增的可选 Option：传入业务侧的 `orderflow.Logger` 实现，让 `Locker.unlock` 在 Redis 故障 / 网络分区下失败时打 ERROR 日志（含 lock key + error）。不注入时使用包内 nop 实现保持向后兼容，但 unlock 静默失败会让锁卡到 TTL 才自动释放，期间业务表现为"操作太频繁"——**生产环境强烈建议注入**。
 
 推荐配合 DB 部分唯一索引（`UNIQUE (user_id, product_id) WHERE status = 'pending'`）做"前端 debounce + 应用层锁 + DB 兜底"三层防御。
 
@@ -396,6 +401,11 @@ onPaid := func(ctx context.Context, o *myorder.Order, n orderflow.NotifyResult) 
 
 onAnomaly := func(ctx context.Context, o *myorder.Order, kind orderflow.AnomalyKind, detail string) {
     alerting.Send(kind, o.OrderNo(), detail) // 接告警，人工介入
+}
+
+// 用户主动取消订单时触发（CancelByUser 推 StatusCancelled 路径，独立于 OnClosed）
+onCancelled := func(ctx context.Context, o *myorder.Order, reason string) {
+    metrics.Counter("order.cancelled").With("reason", reason).Inc()
 }
 ```
 
@@ -450,6 +460,7 @@ engine, err := orderflow.New[*myorder.Order](orderflow.Config[*myorder.Order]{
     OnPaid:       onPaid,
     OnAnomaly:    onAnomaly,
     OnClosed:     func(ctx context.Context, o *myorder.Order, reason orderflow.ClosedReason) { /* ... */ },
+    OnCancelled:  onCancelled, // v1.6.0+ 用户主动取消（区别于 OnClosed 系统型关闭）
     OnReopened:   func(ctx context.Context, o *myorder.Order, n orderflow.NotifyResult) { /* ... */ },
     OnSuperseded: func(ctx context.Context, old *myorder.Order, newProductID uint64) { /* ... */ },
 
@@ -940,6 +951,43 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 
 `Gateway` 默认不探测——网关健康语义多变（白名单 IP、签名密钥），由业务侧在网关 driver 内自行实现。
 
+### `Engine.CancelByUser(ctx, userID, orderNo, reason)` —— 用户主动取消（v1.6.0+）
+
+把"我的订单 → 取消"按钮接到本方法。与 `CloseByUser` / `CloseByAdmin` 的语义边界：
+
+| 方法 | 终态 | 守卫 | 适用 |
+|---|---|---|---|
+| `CancelByUser` | `StatusCancelled` | 绕过 ExpireAt | 用户主动放弃支付（**用户操作型终止**） |
+| `CloseByUser` | `StatusClosed` | 仅过期可关 | 用户调用"关闭过期订单"（少见） |
+| `CloseByAdmin` | `StatusClosed` | 绕过 ExpireAt | 风控 / 客服 / 运维（**系统型终止**） |
+
+⚠ **鉴权强约束**：`userID` 必须来自鉴权后的可信身份（JWT Claims / Session），**禁止**直接接受请求体里的 `user_id`。Engine 内已校验 `order.UserID() == userID`，不匹配返回 `ErrOrderForbidden`。
+
+流程：身份校验 → 网关 `CloseOrder`（带重试 + 可忽略错误）→ `CASCancel` → `publishStatus` → `appendLog`（actor=`user`）→ `EventOrderCancelled` 事件 → `OnCancelled` 钩子。非 Pending 状态直接 skip 返回 nil（幂等）。
+
+```go
+// HTTP handler 示例
+http.HandleFunc("POST /api/orders/{no}/cancel", func(w http.ResponseWriter, r *http.Request) {
+    userID := mustGetUserIDFromAuth(r) // 从 JWT/Session 取，禁止用 body 里的 user_id
+    orderNo := r.PathValue("no")
+    reason := r.FormValue("reason") // 业务自定义如 "switch_payment" / "price_changed"
+
+    err := engine.CancelByUser(r.Context(), userID, orderNo, reason)
+    switch {
+    case errors.Is(err, orderflow.ErrOrderNotFound):
+        http.Error(w, "order not found", http.StatusNotFound)
+    case errors.Is(err, orderflow.ErrOrderForbidden):
+        http.Error(w, "forbidden", http.StatusForbidden)
+    case err != nil:
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+    default:
+        w.WriteHeader(http.StatusOK)
+    }
+})
+```
+
+`reason` 字符串原样写入流水 remark 并透传给 `OnCancelled` 钩子，便于业务侧统计"切换支付方式 / 价格变化重新下单 / 不想买了"等动机分布。
+
 ### `Engine.CloseByAdmin(ctx, orderNo, reason)` —— 强制关单
 
 适用于风控规则触发、客服工单处理、后台运营强关。**绕过 ExpireAt 守卫**——未到期的 Pending 订单也能直接关闭。
@@ -1069,17 +1117,71 @@ go worker.StartAll(ctx, engine)  // 三个 worker 一次起：CloseWorker / Clos
 
 ## 里程碑与版本
 
-本仓当前为 **v1.0.0 稳定版**，遵循 [SemVer 2.0.0](https://semver.org/lang/zh-CN/) 严格模式。
+本仓遵循 [SemVer 2.0.0](https://semver.org/lang/zh-CN/) 严格模式。
 
 主要里程碑：
 
 - `v0.1.0`：骨架落地，定义全部接口与类型
 - `v0.2.0`：`Engine.Create / PollStatus / Timeline / ListUserOrders / Subscribe / HandleNotify / Close / ReconcilePaid` 核心方法
 - `v0.3.0`：`worker/` 子包（`CloseWorker` / `CloseFallback` / `DeliveryFallback` + `StartAll`）
-- `v0.4.0` ~ `v0.4.3`：4 个 driver 全部落地（`paymgrgw` / `gormstore` / `rediscache` / `rediszq`）
-- `v1.0.0`（**当前**）：稳定化，进入 SemVer 严格模式
+- `v0.4.0` ~ `v0.4.3`：4 个 driver 全部落地（`paymgrgw` / `gormstore` / `rediscache` / `rediszq`)
+- `v1.0.0`：稳定化，进入 SemVer 严格模式
+- `v1.3.0`：移除 `*slog.Logger` 依赖，改为自定义 `orderflow.Logger` 接口（业务方自由包装日志框架）
+- `v1.4.0`：⚠ BREAKING——`OrderStatus` 数值布局重写、`PayMethod` / `ProductType` 改为 typed enum、`gormstore` 解耦内置账单 / 流水模型（`BillWriter` / `LogStore` 接口）、`FinalizeExtra` / `GenerateOrderNoFunc` 签名调整
+- `v1.5.0`：订单生命周期审计加固（OnPaid / DeliveryFallback / StatusCancelled 文档强化；`AnomalyDelayQueueCleanupFailed` 异常类别；`rediscache.WithLockerLogger` Option），`gormstore` 标准建表脚本降级为参考 schema（`examples/sql/reference_schema.sql`）
+- `v1.6.0`（**当前**）：⚠ BREAKING——`Store.CASConfirmPaid` / `CASReopenPaid` 加 `expectedAmount` 二级金额校验、`Store` 接口新增 `CASCancel` 方法。新增 `Engine.CancelByUser` API + `OnCancelled` 钩子 + `EventOrderCancelled` 事件 + `gormstore.ColumnMap.PayAmount` 字段
+- `v1.6.1`（**README 同步**）：补全 v1.5 / v1.6 的对外接口文档（`CancelByUser` / `OnCancelledHook` / 自定义 Store 升级路径）
 
 发版与依赖维护规范见 [`drivers/RELEASING.md`](./drivers/RELEASING.md)。
+
+### 自定义 Store 实现的升级路径（v1.5.x → v1.6.0+）
+
+如果业务方实现了**自定义 Store**（不使用 `gormstore`），升级到 v1.6.0 时需要按以下两点修改，否则编译失败：
+
+**1. `CASConfirmPaid` / `CASReopenPaid` 签名变更（加 `expectedAmount`）**
+
+```go
+// 旧签名（v1.5.x 及之前）
+CASConfirmPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time) (int64, error)
+
+// 新签名（v1.6.0+）
+CASConfirmPaid(ctx context.Context, orderNo, tradeNo string, paidAt time.Time, expectedAmount int64) (int64, error)
+```
+
+driver 实现必须把 `expectedAmount` 加到 CAS WHERE 子句作为二级金额校验：
+
+```sql
+UPDATE orders SET status=10, trade_no=?, paid_at=?
+WHERE order_no=? AND status=0 AND pay_amount=?
+```
+
+`pay_amount=?` 是关键——错金额的支付回调即使绕过上游 `amount-mismatch` 校验也无法在此处推进状态。`CASReopenPaid` 同理。
+
+**2. 新增 `CASCancel(ctx, orderNo) (int64, error)` 方法**
+
+driver 必须实现把 Pending 订单原子推进到 `StatusCancelled`：
+
+```sql
+UPDATE orders SET status=50, updated_at=NOW()
+WHERE order_no=? AND status=0
+```
+
+供 `Engine.CancelByUser` 调用。`gormstore` 已实现，业务方使用 `gormstore` 的无需做任何改动。
+
+### `gormstore` 自定义 ColumnMap 的升级路径（v1.5.x → v1.6.0+）
+
+v1.6.0 给 `gormstore.ColumnMap` 新增 `PayAmount` 字段（默认 `"pay_amount"`）。如果业务订单表用**非默认列名**（例如 `amt`），必须在 `ColumnMap` 显式设置：
+
+```go
+gormstore.Config[*MyOrder, MyOrder]{
+    ColumnMap: gormstore.ColumnMap{
+        // 已有字段...
+        PayAmount: "amt", // ← v1.6.0+ 必须显式设置（否则 CAS 走默认 "pay_amount" 会全部 affected=0）
+    },
+}
+```
+
+默认列名 `pay_amount` 的下游无需改动，零值会走默认。
 
 ---
 
