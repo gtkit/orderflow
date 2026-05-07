@@ -1093,11 +1093,17 @@ func (s *RefundService) Apply(ctx context.Context, a Application) error {
         return fmt.Errorf("gateway refund: %w", err)
     }
 
-    // Step 3：记录网关返回的退款单号；终态等异步通知 / 主动 Query 推进
+    // Step 3：按渠道行为契约决定本地状态
+    //   - 支付宝：resp.Status == Succeeded（同步即终态），直接走 markResolved 触发反向核销
+    //   - 微信：resp.Status == Processing（等异步通知），CAS 推进到 processing
+    //   - Unknown：渠道返回需人工介入或未识别状态——不要直接落终态，等 Query / 异步通知推进
+    if resp.Status.IsTerminal() {
+        return s.markResolved(ctx, a.ID, resp.Status, resp.GatewayRefundID, time.Now())
+    }
     _, err = s.db.ExecContext(ctx,
-        `UPDATE business_refund_records SET gateway_refund_id = ?, status = 'processing'
+        `UPDATE business_refund_records SET gateway_refund_id = ?, status = ?
          WHERE id = ? AND status = 'pending'`,
-        resp.GatewayRefundID, a.ID)
+        resp.GatewayRefundID, string(resp.Status), a.ID)
     return err
 }
 
@@ -1170,25 +1176,56 @@ func (s *RefundService) markResolved(ctx context.Context, refundID string,
 
 ### 状态映射
 
-`RefundTradeStatus` 四值由 driver 内部映射渠道原始状态：
+`RefundTradeStatus` 五值由 driver 内部映射渠道原始状态。务必用 `IsTerminal()` 判断，不要硬编码：
 
-| `RefundTradeStatus` | 含义 | 业务方处理 |
-|---|---|---|
-| `pending` | 已提交渠道，渠道侧尚未处理（少见） | 等回调 / 主动 Query |
-| `processing` | 渠道侧已受理，处理中 | 与 pending 等价处理 |
-| `succeeded` | 退款成功（终态） | CAS 推进 + 反向核销 |
-| `failed` | 退款失败（含关闭 / 异常 / 未知错误） | CAS 推进 + 通知客服 |
+| `RefundTradeStatus` | 终态？ | 含义 | 业务方处理 |
+|---|---|---|---|
+| `pending` | 否 | 已提交渠道，渠道侧尚未处理（少见） | 等回调 / 主动 Query |
+| `processing` | 否 | 渠道侧已受理，处理中 | 等回调 / 主动 Query |
+| `succeeded` | **是** | 退款成功（款项已原路返回） | CAS 推进到 succeeded + 反向核销 |
+| `failed` | **是** | 退款明确失败（含 closed / 未知错误等渠道返回的失败终态） | CAS 推进到 failed + 通知客服 |
+| `unknown` | 否 | 状态待定——渠道返回需人工介入（如微信 ABNORMAL）或 driver 暂未识别的状态字面量 | **告警** + 不触发反向核销 + 继续观察 Query |
+
+**关键不变量**：`unknown` 是**非终态**——业务方收到 unknown 时不能落终态，不能触发反向核销。`mapRefundStatus` 内部规则：
+- `paymgr.RefundStatusAbnormal`（"需人工介入"）→ `unknown`（非终态）
+- `paymgr` 暂未识别的状态字面量 → `unknown`（让业务方告警，避免 SDK 升级时静默漂移）
+- `paymgr.RefundStatusClosed` / `RefundStatusError` → `failed`（终态失败）
 
 业务方需要拿到渠道原始状态（如微信 SUCCESS / 支付宝 REFUND_PROCESSING）做精细化处理时，通过 `RefundQueryResult.Raw` / `RefundNotifyResult.Raw` 类型断言取回 SDK 原始结构。
 
+### `RefundResponse.Status` 的渠道行为契约
+
+`Refund` 同步调用返回的 `RefundResponse.Status` 由 driver 按渠道行为契约填写，业务方据此判断**是否要等异步通知**：
+
+| 渠道 | `RefundResponse.Status` | 业务方编排 |
+|---|---|---|
+| 支付宝 | `succeeded`（同步即终态） | 直接走 `markResolved` 触发反向核销 |
+| 微信 | `processing`（等异步通知） | CAS 推进到 processing，等异步通知或 Query |
+| 其他 / 未识别渠道 | `processing`（保守默认） | 同微信路径 |
+
+业务方编排应用 `resp.Status.IsTerminal()` 判断，不要硬编码渠道名——这样未来扩展新渠道时无需改业务代码。
+
 ### 错误识别
 
-`IsIgnorableRefundError` 已识别的"渠道侧已处理"幂等错误：
+`IsIgnorableRefundError` **已识别**的"渠道侧已处理"幂等错误（基于阅读 paymgr 源码 + 经验，未在生产环境穷举验证）：
 
 - 微信：`RESOURCE_ALREADY_EXISTS` / `DUPLICATE_REQUEST`
 - 支付宝：`ACQ.DUPLICATE_REFUND_REQUEST` / `ACQ.TRADE_HAS_REFUND_LIMIT`
 
-业务方观察到新的渠道幂等错误码需要纳入识别时，请提交 PR 补充 `drivers/paymgrgw/refund_gateway.go` 的 `IsIgnorableRefundError` 实现。
+业务方在生产环境观察到本函数未识别的渠道幂等错误码（典型表现：调 `Refund` 拿到错误 → `IsIgnorableRefundError` 返回 false → 但 `QueryRefund` 显示渠道侧已存在该退款单），请提交 PR 补充 `drivers/paymgrgw/refund_gateway.go` 的 `IsIgnorableRefundError` 实现。在收到补丁前，**业务侧建议在自己的编排里加一层"未识别错误时主动 Query 兜底"逻辑作为临时缓解**：
+
+```go
+if err != nil {
+    if s.gateway.IsIgnorableRefundError(a.Channel, err) {
+        return s.reconcile(ctx, a)
+    }
+    // 缓解：未识别错误也走一次 Query，确认渠道侧是否真的没收到请求
+    if qres, qerr := s.gateway.QueryRefund(ctx, a.Channel, a.ID); qerr == nil && qres.Status != "" {
+        return s.markResolved(ctx, a.ID, qres.Status, qres.GatewayRefundID, qres.SucceededAt)
+    }
+    return fmt.Errorf("gateway refund: %w", err)
+}
+```
 
 ---
 

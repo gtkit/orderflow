@@ -21,25 +21,31 @@
 > 新增退款流程的协议层抽象。**零破坏性**——v1.6.x 用户升级无需任何代码改动；不接退款的项目继续运行不受影响。
 >
 > 子模块同步发版：`drivers/paymgrgw/v1.2.0`（实装 `RefundGateway`）。`drivers/gormstore` / `drivers/rediscache` / `drivers/rediszq` 本版无源码改动，**不**联动发版。
+>
+> ⚠ **接入限制说明（接入方必读）**：本版 `IsIgnorableRefundError` 已识别的渠道幂等错误码与 `mapRefundStatus` 的状态映射均基于阅读 `paymgr` 源码 + 经验推断，**未在生产环境穷举验证**。业务方在生产环境观察到未识别的渠道错误码或状态字面量时，请提交 PR 补充 driver 实现。文档「错误识别」章节给出了"未识别错误时主动 Query 兜底"的临时缓解模板。
 
 ### Added
 - 新增 `RefundGateway` 接口（[`refund_gateway.go`](./refund_gateway.go)），包含 `Refund` / `QueryRefund` / `ParseRefundNotify` / `AckRefundNotify` / `IsIgnorableRefundError` 5 方法，与 `PaymentGateway` 并列，让一个 driver 实例可同时实现两个接口
-- 新增协议层通用类型（[`refund_types.go`](./refund_types.go)）：`RefundRequest` / `RefundResponse` / `RefundQueryResult` / `RefundNotifyResult` 4 个 struct + `RefundTradeStatus` 枚举（`pending` / `processing` / `succeeded` / `failed`）+ `String()` / `IsTerminal()` 方法
+- 新增协议层通用类型（[`refund_types.go`](./refund_types.go)）：
+  - `RefundRequest`：`OutTradeNo` / `TransactionID`（二选一） / `OutRefundNo`（业务幂等键） / `RefundAmount` / `TotalAmount` / `Reason` / `NotifyURL` / `Metadata`
+  - `RefundResponse`：`OutRefundNo` / `GatewayRefundID` / **`Status`**（按渠道行为契约：alipay 同步成功 = succeeded，wechat 同步成功 = processing） / `RefundAmount` / `Channel` / `Raw`
+  - `RefundQueryResult` / `RefundNotifyResult`：包含 `OutTradeNo` / `TransactionID` / `OutRefundNo` / `GatewayRefundID` / `Status` / `RefundAmount` / `TotalAmount` / `SucceededAt` / `Channel` / `Raw`；`RefundNotifyResult` 额外含 `UserReceivedAccount`（仅微信返回）
+  - `RefundTradeStatus` 枚举 5 值：`pending` / `processing` / `succeeded`（终态） / `failed`（终态） / `unknown`（**非终态**——含渠道返回需人工介入或 driver 暂未识别的状态字面量，业务方应告警 + 不触发反向核销 + 等 Query 推进）
+  - `IsTerminal()` 严格只对 `succeeded` / `failed` 返回 true；`String()` 对未声明值返回 `"invalid"` 与合法 `"unknown"` 区分
 - 新增 sentinel `ErrRefundNotFound`（[`errors.go`](./errors.go)），driver 在 `QueryRefund` 找不到退款单时统一返回，调用方用 `errors.Is` 识别
 - `drivers/paymgrgw.Gateway` 实装 `RefundGateway` 接口，包装底层 `paymgr.Provider` 的退款方法到 orderflow 通用类型；同一实例同时满足 `PaymentGateway` 与 `RefundGateway`，业务方拿一个指针即可在支付与退款两条路径复用
-- `drivers/paymgrgw` 实装 `IsIgnorableRefundError`：识别微信 `RESOURCE_ALREADY_EXISTS` / `DUPLICATE_REQUEST`、支付宝 `ACQ.DUPLICATE_REFUND_REQUEST` / `ACQ.TRADE_HAS_REFUND_LIMIT` 等"渠道侧已处理"幂等错误码
-- 新增 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)：可编译的最小退款编排示例，含事务边界、CAS 防重放、异步通知处理、反向核销骨架
+- `drivers/paymgrgw.Gateway.Refund` 同步返回的 `RefundResponse.Status` 按渠道行为契约填写（`syncRefundStatus`）：支付宝 → succeeded（同步即终态），微信 / 其他渠道 → processing（等异步通知）；业务方据 `Status.IsTerminal()` 决定是否立即触发反向核销
+- `drivers/paymgrgw` 的 `mapRefundStatus`：`paymgr.RefundStatusAbnormal`（"需人工介入"）→ `RefundTradeStatusUnknown`（**非终态**，避免误触发反向核销）；`paymgr` 暂未识别的状态字面量 → `RefundTradeStatusUnknown`，让业务方告警识别 SDK 升级 / 新渠道行为，不会静默落入终态
+- `drivers/paymgrgw` 实装 `IsIgnorableRefundError`：识别微信 `RESOURCE_ALREADY_EXISTS` / `DUPLICATE_REQUEST`、支付宝 `ACQ.DUPLICATE_REFUND_REQUEST` / `ACQ.TRADE_HAS_REFUND_LIMIT` 等"渠道侧已处理"幂等错误码（基于源码 + 经验，未生产穷举验证）
+- 新增 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)：可编译的最小退款编排示例，含事务边界、CAS 防重放、按 `RefundResponse.Status.IsTerminal()` 分支处理同步终态 / 中间态、异步通知处理、反向核销骨架
 
 ### Changed
 - README 「适用场景 ✅ 适用」清单加入"退款（自行编排）"，明确库提供协议层抽象，编排由调用方实现
-- README 新增「退款（自行编排，v1.7.0+）」章节（位于「运维 / 后台 API」与「上线前清单」之间），覆盖：库为何不做完整退款编排、`RefundGateway` 接口签名、与 `Engine` 的依赖差异表、可抄的最小编排骨架（事务边界 + CAS 模板 + 异步通知）、金额可变（审批改金额）的处理、部分退款 + 多次退款的累加策略、状态映射表、错误识别清单
+- README 新增「退款（自行编排，v1.7.0+）」章节（位于「运维 / 后台 API」与「上线前清单」之间），覆盖：库为何不做完整退款编排、`RefundGateway` 接口签名、与 `Engine` 的依赖差异表、可抄的最小编排骨架（事务边界 + 按 `Status.IsTerminal()` 分支 + 异步通知）、金额可变（审批改金额）的处理、部分退款 + 多次退款的累加策略、状态映射表（含 unknown 非终态语义）、`RefundResponse.Status` 渠道行为契约、错误识别清单 + "未识别错误主动 Query 兜底"临时缓解模板
 - README 「里程碑与版本」章节追加 v1.7.0 条目
 - `doc.go` 包注释一行提及退款协议层支持
 - `drivers/paymgrgw/doc.go` 包注释同步说明 `Gateway` 同时实现两个接口
-- 测试中 `fakeProvider.Refund` / `QueryRefund` / `ParseRefundNotify` 由 `errors.New("...not used")` stub 改为可编程实装，让真实退款路径接入测试矩阵
-
-### Fixed
-- `drivers/paymgrgw` 测试矩阵补齐：从原本只覆盖 5 个支付侧方法，扩展到覆盖全部 10 个 `Provider` 方法，消除"未触达代码"的覆盖率盲点
+- 测试中 `fakeProvider.Refund` / `QueryRefund` / `ParseRefundNotify` 由 `errors.New("...not used")` stub 改为可编程实装，原 5 个支付侧方法 + 新增的 4 个退款相关方法 + ACKNotify 共 10 个 `Provider` 方法均接入可控测试夹具，覆盖类型字段映射、`syncRefundStatus` 的渠道行为契约、`mapRefundStatus` 的全量状态映射（含 abnormal → Unknown / 未识别 → Unknown）、错误识别等用例
 
 ## [1.6.1] - 2026-05-07
 

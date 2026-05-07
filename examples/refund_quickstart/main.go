@@ -75,11 +75,19 @@ func (s *RefundService) Apply(ctx context.Context, a Application) error {
 		return fmt.Errorf("gateway refund: %w", err)
 	}
 
-	// Step 3：记录网关返回的退款单号；最终态等异步通知或主动 Query 推进
+	// Step 3：按渠道行为契约决定本地状态——
+	//   - 支付宝：resp.Status == Succeeded（同步即终态），CAS 推进到 succeeded + 触发反向核销
+	//   - 微信：resp.Status == Processing（等异步通知），CAS 推进到 processing 等回调
+	//   - 其他渠道：保守按 resp.Status 推进
+	if resp.Status.IsTerminal() {
+		// 同步终态（典型支付宝路径）：直接走 markResolved，CAS 防重放 + 触发反向核销
+		return s.markResolved(ctx, a.ID, resp.Status, resp.GatewayRefundID, time.Now())
+	}
+	// 中间态（典型微信路径）：仅记录 GatewayRefundID + 推进到 processing，等异步回调
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE business_refund_records SET gateway_refund_id = ?, status = 'processing'
+		`UPDATE business_refund_records SET gateway_refund_id = ?, status = ?
 		 WHERE id = ? AND status = 'pending'`,
-		resp.GatewayRefundID, a.ID)
+		resp.GatewayRefundID, string(resp.Status), a.ID)
 	return err
 }
 

@@ -30,13 +30,14 @@ func TestRefund_SuccessMapsFields(t *testing.T) {
 	g := newTestGateway(t, fp)
 
 	resp, err := g.Refund(context.Background(), orderflow.Channel(fakeChannel), orderflow.RefundRequest{
-		OutTradeNo:   "OUT-1",
-		OutRefundNo:  "OR-1",
-		RefundAmount: 100,
-		TotalAmount:  100,
-		Reason:       "客户申请",
-		NotifyURL:    "https://example.com/refund-notify",
-		Metadata:     map[string]string{"ticket": "T-1"},
+		OutTradeNo:    "OUT-1",
+		TransactionID: "TXN-1",
+		OutRefundNo:   "OR-1",
+		RefundAmount:  100,
+		TotalAmount:   100,
+		Reason:        "客户申请",
+		NotifyURL:     "https://example.com/refund-notify",
+		Metadata:      map[string]string{"ticket": "T-1"},
 	})
 	if err != nil {
 		t.Fatalf("Refund: %v", err)
@@ -47,6 +48,16 @@ func TestRefund_SuccessMapsFields(t *testing.T) {
 	if resp.GatewayRefundID != "GW-REFUND-1" {
 		t.Errorf("GatewayRefundID = %q", resp.GatewayRefundID)
 	}
+	if resp.RefundAmount != 100 {
+		t.Errorf("RefundAmount = %d, want 100", resp.RefundAmount)
+	}
+	if resp.Channel != orderflow.Channel(fakeChannel) {
+		t.Errorf("Channel = %q", resp.Channel)
+	}
+	// fakeChannel 不是 alipay/wechat，syncRefundStatus 走 default 分支 → Processing
+	if resp.Status != orderflow.RefundTradeStatusProcessing {
+		t.Errorf("Status = %q, want processing (default for unknown channel)", resp.Status)
+	}
 	if resp.Raw != fp.refundResp {
 		t.Errorf("Raw should preserve original *paymgr.RefundResponse pointer")
 	}
@@ -55,10 +66,42 @@ func TestRefund_SuccessMapsFields(t *testing.T) {
 	if fp.refundGot == nil {
 		t.Fatal("fakeProvider.Refund was not invoked")
 	}
-	if fp.refundGot.OutTradeNo != "OUT-1" || fp.refundGot.OutRefundNo != "OR-1" ||
+	if fp.refundGot.OutTradeNo != "OUT-1" || fp.refundGot.TransactionID != "TXN-1" ||
+		fp.refundGot.OutRefundNo != "OR-1" ||
 		fp.refundGot.RefundAmount != 100 || fp.refundGot.TotalAmount != 100 ||
 		fp.refundGot.Reason != "客户申请" || fp.refundGot.NotifyURL != "https://example.com/refund-notify" {
 		t.Errorf("Refund req not propagated: %+v", fp.refundGot)
+	}
+}
+
+// TestRefund_SyncStatusByChannel 验证 syncRefundStatus 的渠道行为契约：
+// alipay 同步成功 = succeeded（终态）、wechat = processing（等异步）。
+// 这是业务方编排的关键：业务方据此决定是否在 Refund 返回后立即触发反向核销。
+func TestRefund_SyncStatusByChannel(t *testing.T) {
+	cases := []struct {
+		ch         paymgr.Channel
+		wantStatus orderflow.RefundTradeStatus
+	}{
+		{paymgr.ChannelAlipay, orderflow.RefundTradeStatusSucceeded},
+		{paymgr.ChannelWechat, orderflow.RefundTradeStatusProcessing},
+		{paymgr.Channel("custom-rail"), orderflow.RefundTradeStatusProcessing}, // default 保守处理
+	}
+	for _, c := range cases {
+		fp := &fakeProvider{
+			channel: c.ch,
+			refundResp: &paymgr.RefundResponse{
+				Channel: c.ch, OutRefundNo: "OR-X", RefundID: "GW-X", RefundAmount: 1,
+			},
+		}
+		g := newTestGateway(t, fp)
+		resp, err := g.Refund(context.Background(), orderflow.Channel(c.ch),
+			orderflow.RefundRequest{OutTradeNo: "OUT-X", OutRefundNo: "OR-X", RefundAmount: 1, TotalAmount: 1})
+		if err != nil {
+			t.Fatalf("channel %q: %v", c.ch, err)
+		}
+		if resp.Status != c.wantStatus {
+			t.Errorf("channel %q: Status = %q, want %q", c.ch, resp.Status, c.wantStatus)
+		}
 	}
 }
 
@@ -105,11 +148,20 @@ func TestQueryRefund_SuccessMapsFields(t *testing.T) {
 	if res.OutRefundNo != "OR-1" || res.GatewayRefundID != "GW-REFUND-1" {
 		t.Errorf("ID fields not propagated: %+v", res)
 	}
+	if res.OutTradeNo != "OUT-1" {
+		t.Errorf("OutTradeNo = %q, want OUT-1", res.OutTradeNo)
+	}
+	if res.TransactionID != "TXN-1" {
+		t.Errorf("TransactionID = %q, want TXN-1", res.TransactionID)
+	}
 	if res.Status != orderflow.RefundTradeStatusSucceeded {
 		t.Errorf("Status = %q, want succeeded", res.Status)
 	}
 	if res.RefundAmount != 100 {
 		t.Errorf("RefundAmount = %d", res.RefundAmount)
+	}
+	if res.TotalAmount != 100 {
+		t.Errorf("TotalAmount = %d, want 100", res.TotalAmount)
 	}
 	if !res.SucceededAt.Equal(refundedAt) {
 		t.Errorf("SucceededAt = %v, want %v", res.SucceededAt, refundedAt)
@@ -156,10 +208,10 @@ func TestQueryRefund_RefundStatusMapping(t *testing.T) {
 	}{
 		{paymgr.RefundStatusProcessing, orderflow.RefundTradeStatusProcessing},
 		{paymgr.RefundStatusSuccess, orderflow.RefundTradeStatusSucceeded},
-		{paymgr.RefundStatusClosed, orderflow.RefundTradeStatusFailed},
-		{paymgr.RefundStatusAbnormal, orderflow.RefundTradeStatusFailed},
-		{paymgr.RefundStatusError, orderflow.RefundTradeStatusFailed},
-		{paymgr.RefundStatus("totally-unknown"), orderflow.RefundTradeStatusPending}, // 未识别 → pending 让调用方继续观察
+		{paymgr.RefundStatusClosed, orderflow.RefundTradeStatusFailed},                // 渠道关闭 / 终态失败
+		{paymgr.RefundStatusError, orderflow.RefundTradeStatusFailed},                 // 未知错误 / 终态失败
+		{paymgr.RefundStatusAbnormal, orderflow.RefundTradeStatusUnknown},             // 需人工介入 / 非终态
+		{paymgr.RefundStatus("totally-unknown"), orderflow.RefundTradeStatusUnknown},  // driver 未识别 → 业务方告警
 	}
 	for _, c := range cases {
 		fp := &fakeProvider{
@@ -188,14 +240,16 @@ func TestParseRefundNotify_SuccessMapsFields(t *testing.T) {
 	fp := &fakeProvider{
 		channel: fakeChannel,
 		refundNotifyResp: &paymgr.RefundNotifyResult{
-			Channel:      fakeChannel,
-			OutTradeNo:   "OUT-N",
-			OutRefundNo:  "OR-N",
-			RefundID:     "GW-REFUND-N",
-			RefundStatus: paymgr.RefundStatusSuccess,
-			RefundAmount: 200,
-			TotalAmount:  200,
-			RefundedAt:   refundedAt,
+			Channel:             fakeChannel,
+			OutTradeNo:          "OUT-N",
+			TransactionID:       "TXN-N",
+			OutRefundNo:         "OR-N",
+			RefundID:            "GW-REFUND-N",
+			RefundStatus:        paymgr.RefundStatusSuccess,
+			RefundAmount:        200,
+			TotalAmount:         200,
+			RefundedAt:          refundedAt,
+			UserReceivedAccount: "招商银行信用卡0403",
 		},
 	}
 	g := newTestGateway(t, fp)
@@ -207,6 +261,18 @@ func TestParseRefundNotify_SuccessMapsFields(t *testing.T) {
 	}
 	if res.OutRefundNo != "OR-N" || res.GatewayRefundID != "GW-REFUND-N" {
 		t.Errorf("ID fields not propagated: %+v", res)
+	}
+	if res.OutTradeNo != "OUT-N" {
+		t.Errorf("OutTradeNo = %q, want OUT-N", res.OutTradeNo)
+	}
+	if res.TransactionID != "TXN-N" {
+		t.Errorf("TransactionID = %q, want TXN-N", res.TransactionID)
+	}
+	if res.TotalAmount != 200 {
+		t.Errorf("TotalAmount = %d, want 200", res.TotalAmount)
+	}
+	if res.UserReceivedAccount != "招商银行信用卡0403" {
+		t.Errorf("UserReceivedAccount = %q, want 招商银行信用卡0403", res.UserReceivedAccount)
 	}
 	if res.Status != orderflow.RefundTradeStatusSucceeded {
 		t.Errorf("Status = %q", res.Status)

@@ -15,17 +15,23 @@ var _ orderflow.RefundGateway = (*Gateway)(nil)
 //
 // 同一 OutRefundNo 重复提交时，渠道侧通常返回"退款单已存在 / 已成功"类幂等错误，
 // 由 IsIgnorableRefundError 映射为可忽略，调用方据此走 QueryRefund 路径拿真实状态。
+//
+// 返回的 RefundResponse.Status 按渠道行为契约填写：
+//   - 支付宝：同步成功即终态——填 RefundTradeStatusSucceeded，调用方可立即触发反向核销
+//   - 微信：同步成功是中间态——填 RefundTradeStatusProcessing，调用方应等异步通知
+//   - 其他 / 未识别渠道：保守填 RefundTradeStatusProcessing，让调用方走 Query / 异步通知路径
 func (g *Gateway) Refund(ctx context.Context, ch orderflow.Channel, req orderflow.RefundRequest) (orderflow.RefundResponse, error) {
 	if err := g.Validate(); err != nil {
 		return orderflow.RefundResponse{}, err
 	}
 	resp, err := g.mgr.Refund(ctx, paymgr.Channel(ch), &paymgr.RefundRequest{
-		OutTradeNo:   req.OutTradeNo,
-		OutRefundNo:  req.OutRefundNo,
-		RefundAmount: req.RefundAmount,
-		TotalAmount:  req.TotalAmount,
-		Reason:       req.Reason,
-		NotifyURL:    req.NotifyURL,
+		OutTradeNo:    req.OutTradeNo,
+		TransactionID: req.TransactionID,
+		OutRefundNo:   req.OutRefundNo,
+		RefundAmount:  req.RefundAmount,
+		TotalAmount:   req.TotalAmount,
+		Reason:        req.Reason,
+		NotifyURL:     req.NotifyURL,
 	})
 	if err != nil {
 		return orderflow.RefundResponse{}, err
@@ -33,6 +39,9 @@ func (g *Gateway) Refund(ctx context.Context, ch orderflow.Channel, req orderflo
 	return orderflow.RefundResponse{
 		OutRefundNo:     resp.OutRefundNo,
 		GatewayRefundID: resp.RefundID,
+		Status:          syncRefundStatus(paymgr.Channel(ch)),
+		RefundAmount:    resp.RefundAmount,
+		Channel:         orderflow.Channel(resp.Channel),
 		Raw:             resp,
 	}, nil
 }
@@ -55,9 +64,12 @@ func (g *Gateway) QueryRefund(ctx context.Context, ch orderflow.Channel, outRefu
 	}
 	return orderflow.RefundQueryResult{
 		OutRefundNo:     resp.OutRefundNo,
+		OutTradeNo:      resp.OutTradeNo,
+		TransactionID:   resp.TransactionID,
 		GatewayRefundID: resp.RefundID,
 		Status:          mapRefundStatus(resp.RefundStatus),
 		RefundAmount:    resp.RefundAmount,
+		TotalAmount:     resp.TotalAmount,
 		SucceededAt:     resp.RefundedAt,
 		Channel:         orderflow.Channel(resp.Channel),
 		Raw:             resp,
@@ -77,13 +89,17 @@ func (g *Gateway) ParseRefundNotify(ctx context.Context, ch orderflow.Channel, r
 		return orderflow.RefundNotifyResult{}, err
 	}
 	return orderflow.RefundNotifyResult{
-		OutRefundNo:     n.OutRefundNo,
-		GatewayRefundID: n.RefundID,
-		Status:          mapRefundStatus(n.RefundStatus),
-		RefundAmount:    n.RefundAmount,
-		SucceededAt:     n.RefundedAt,
-		Channel:         orderflow.Channel(n.Channel),
-		Raw:             n,
+		OutRefundNo:         n.OutRefundNo,
+		OutTradeNo:          n.OutTradeNo,
+		TransactionID:       n.TransactionID,
+		GatewayRefundID:     n.RefundID,
+		Status:              mapRefundStatus(n.RefundStatus),
+		RefundAmount:        n.RefundAmount,
+		TotalAmount:         n.TotalAmount,
+		SucceededAt:         n.RefundedAt,
+		Channel:             orderflow.Channel(n.Channel),
+		UserReceivedAccount: n.UserReceivedAccount,
+		Raw:                 n,
 	}, nil
 }
 
@@ -101,12 +117,17 @@ func (g *Gateway) AckRefundNotify(ch orderflow.Channel, w http.ResponseWriter) e
 // IsIgnorableRefundError 判断 Refund 返回的错误是否属于"渠道侧已处理过该退款单"
 // 类幂等错误。返回 true 时，调用方应走 QueryRefund 路径拿真实状态。
 //
-// 已识别的可忽略错误码：
+// 已识别的常见错误码（基于阅读 paymgr 源码 + 经验，未在生产环境穷举验证）：
 //
 //	微信：RESOURCE_ALREADY_EXISTS（退款单已存在）/ DUPLICATE_REQUEST（重复请求）
 //	支付宝：ACQ.DUPLICATE_REFUND_REQUEST（重复退款请求）/ ACQ.TRADE_HAS_REFUND_LIMIT（金额一致幂等）
 //
-// 业务方观察到新的渠道幂等错误码需要纳入识别时，请提交 PR 补充本函数。
+// 业务方在生产环境观察到本函数未识别的渠道幂等错误码（典型表现：调 Refund
+// 拿到错误 → IsIgnorableRefundError 返回 false → 但 QueryRefund 显示渠道侧已存在
+// 该退款单），请提交 PR 补充本函数；业务侧在收到补丁前可在自己的编排里加一层
+// "未识别错误时主动 Query 兜底"逻辑作为临时缓解。
+//
+// nil error 返回 false。
 func (g *Gateway) IsIgnorableRefundError(ch orderflow.Channel, err error) bool {
 	if err == nil {
 		return false
@@ -153,23 +174,48 @@ func isRefundNotFound(ch orderflow.Channel, err error) bool {
 	return false
 }
 
+// syncRefundStatus 按渠道行为契约决定 RefundResponse.Status：
+//
+//   - 支付宝：同步成功 = 终态 succeeded（渠道侧立即完成退款）
+//   - 微信：同步成功 = processing（渠道侧后续异步处理，等异步通知或 Query）
+//   - 其他 / 未识别渠道：保守填 processing，业务方按 Query / 异步通知路径推进
+func syncRefundStatus(ch paymgr.Channel) orderflow.RefundTradeStatus {
+	switch ch {
+	case paymgr.ChannelAlipay:
+		return orderflow.RefundTradeStatusSucceeded
+	case paymgr.ChannelWechat:
+		return orderflow.RefundTradeStatusProcessing
+	default:
+		return orderflow.RefundTradeStatusProcessing
+	}
+}
+
 // mapRefundStatus 把底层 paymgr.RefundStatus 映射到 orderflow.RefundTradeStatus。
 //
-// 映射规则按 design.md D3：closed / abnormal / error 全部归为 Failed（终态失败）；
-// 业务方需要区分 abnormal（人工介入）时通过 Raw 字段类型断言取回原始 paymgr.RefundStatus。
+// 映射规则：
+//
+//	processing → Processing（中间态，等推进）
+//	success    → Succeeded（终态，触发反向核销）
+//	closed     → Failed（终态失败：退款关闭未成功）
+//	error      → Failed（终态失败：未知错误）
+//	abnormal   → Unknown（**非终态**——paymgr 注释明确"需人工介入"，
+//	             业务方应告警 + 不触发反向核销 + 等人工处理后渠道推进到真正终态）
+//	未识别字面量 → Unknown（让业务方告警识别 SDK 版本升级 / 新渠道行为）
+//
+// 业务方需要区分 abnormal vs 未识别字面量时通过 Raw 字段类型断言取回原始 paymgr.RefundStatus。
 func mapRefundStatus(s paymgr.RefundStatus) orderflow.RefundTradeStatus {
 	switch s {
 	case paymgr.RefundStatusProcessing:
 		return orderflow.RefundTradeStatusProcessing
 	case paymgr.RefundStatusSuccess:
 		return orderflow.RefundTradeStatusSucceeded
-	case paymgr.RefundStatusClosed,
-		paymgr.RefundStatusAbnormal,
-		paymgr.RefundStatusError:
+	case paymgr.RefundStatusClosed, paymgr.RefundStatusError:
 		return orderflow.RefundTradeStatusFailed
+	case paymgr.RefundStatusAbnormal:
+		// 需人工介入——非终态，业务方应告警 + 等人工推进
+		return orderflow.RefundTradeStatusUnknown
 	default:
-		// 渠道返回了 driver 暂未识别的状态字面量——回退到 pending 让调用方继续观察 / 重试 Query，
-		// 不直接映射为 Failed 避免误触发反向核销终态。
-		return orderflow.RefundTradeStatusPending
+		// driver 暂未识别的状态字面量——让业务方告警感知 SDK 升级或新渠道行为
+		return orderflow.RefundTradeStatusUnknown
 	}
 }
