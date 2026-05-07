@@ -8,14 +8,8 @@ github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e h1:ijClszYn+mADRFY17k
 github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e/go.mod h1:boTsfXsheKC2y+lKOCMpSfarhxDeIzfZG1jqGcPl3cA=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/gtkit/orderflow v1.4.0 h1:pOSGsGkKMRmsLX9m5+LfnbDtI+5OdRkI7HERwfoJtrg=
-github.com/gtkit/orderflow v1.4.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
-github.com/gtkit/orderflow v1.5.0 h1:pG4IDxaGfyPF0ryiimDsVq2y5IfgFhEkuFkzdtf5DmY=
-github.com/gtkit/orderflow v1.5.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
-github.com/gtkit/orderflow v1.6.0 h1:RBbrhk97/I2luvQtthvT1TCjfIsjryK+6GxcvWNyOcs=
-github.com/gtkit/orderflow v1.6.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
-github.com/gtkit/orderflow v1.6.1 h1:3MG3Jh+y6c2JiUKn6V0NyrQRIwk4Fk6q4S2bp8PHLyM=
-github.com/gtkit/orderflow v1.6.1/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
+github.com/gtkit/orderflow v1.7.0 h1:MNiLqJeGlgFRwTNTdrNWUR6HqfpUP1i9uBQl1XN5mTw=
+github.com/gtkit/orderflow v1.7.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
 github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs4luLUK2k=
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/jinzhu/inflection v1.0.0 h1:K317FqzuhWc8YvSVlFMCCUb36O/S9MCKRDI7QkRKD/E=
