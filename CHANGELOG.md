@@ -4,15 +4,32 @@
 
 ## [Unreleased]
 
+> 计划在下一次发版时切到 `[1.7.0]` 区段。无破坏性变更——v1.6.x 用户升级无需任何代码改动；不接退款的项目继续运行不受影响。
+>
+> 计划联动子模块：`drivers/paymgrgw/v1.2.0`（实装 `RefundGateway`）。`drivers/gormstore` / `drivers/rediscache` / `drivers/rediszq` 本版无源码改动，**不**联动发版。
+
 ### Added
+- 新增 `RefundGateway` 接口（[`refund_gateway.go`](./refund_gateway.go)），包含 `Refund` / `QueryRefund` / `ParseRefundNotify` / `AckRefundNotify` / `IsIgnorableRefundError` 5 方法，与 `PaymentGateway` 并列，让一个 driver 实例可同时实现两个接口
+- 新增协议层通用类型（[`refund_types.go`](./refund_types.go)）：`RefundRequest` / `RefundResponse` / `RefundQueryResult` / `RefundNotifyResult` 4 个 struct + `RefundTradeStatus` 枚举（`pending` / `processing` / `succeeded` / `failed`）+ `String()` / `IsTerminal()` 方法
+- 新增 sentinel `ErrRefundNotFound`（[`errors.go`](./errors.go)），driver 在 `QueryRefund` 找不到退款单时统一返回，调用方用 `errors.Is` 识别
+- `drivers/paymgrgw.Gateway` 实装 `RefundGateway` 接口，包装底层 `paymgr.Provider` 的退款方法到 orderflow 通用类型；同一实例同时满足 `PaymentGateway` 与 `RefundGateway`，业务方拿一个指针即可在支付与退款两条路径复用
+- `drivers/paymgrgw` 实装 `IsIgnorableRefundError`：识别微信 `RESOURCE_ALREADY_EXISTS` / `DUPLICATE_REQUEST`、支付宝 `ACQ.DUPLICATE_REFUND_REQUEST` / `ACQ.TRADE_HAS_REFUND_LIMIT` 等"渠道侧已处理"幂等错误码
+- 新增 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)：可编译的最小退款编排示例，含事务边界、CAS 防重放、异步通知处理、反向核销骨架
 
 ### Changed
+- README 「适用场景 ✅ 适用」清单加入"退款（自行编排）"，明确库提供协议层抽象，编排由调用方实现
+- README 新增「退款（自行编排，v1.7.0+）」章节（位于「运维 / 后台 API」与「上线前清单」之间），覆盖：库为何不做完整退款编排、`RefundGateway` 接口签名、与 `Engine` 的依赖差异表、可抄的最小编排骨架（事务边界 + CAS 模板 + 异步通知）、金额可变（审批改金额）的处理、部分退款 + 多次退款的累加策略、状态映射表、错误识别清单
+- README 「里程碑与版本」章节追加 v1.7.0 条目
+- `doc.go` 包注释一行提及退款协议层支持
+- `drivers/paymgrgw/doc.go` 包注释同步说明 `Gateway` 同时实现两个接口
+- 测试中 `fakeProvider.Refund` / `QueryRefund` / `ParseRefundNotify` 由 `errors.New("...not used")` stub 改为可编程实装，让真实退款路径接入测试矩阵
+
+### Fixed
+- `drivers/paymgrgw` 测试矩阵补齐：从原本只覆盖 5 个支付侧方法，扩展到覆盖全部 10 个 `Provider` 方法，消除"未触达代码"的覆盖率盲点
 
 ### Deprecated
 
 ### Removed
-
-### Fixed
 
 ### Security
 

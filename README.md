@@ -17,6 +17,7 @@
 - **中国大陆主流三方支付**：微信、支付宝、银联（通过 `paymgrgw` driver）
 - **支付回调驱动的状态机**：订单状态严格遵循 `Pending → Paid → Delivered`，支持「已关闭后又支付成功」的恢复路径
 - **延时关单 + 幂等履约**：支付超时自动关闭、回调 / 履约钩子幂等重试
+- **退款（自行编排）**：v1.7.0+ 提供 `RefundGateway` 协议层抽象（屏蔽微信 / 支付宝退款 SDK 差异），编排由调用方自行实现——审批工作流、金额计算、退款记录持久化、反向核销均由业务方控制
 
 ### ❌ 不适用
 
@@ -1013,6 +1014,184 @@ _ = engine.CloseByAdmin(ctx, orderNo, fmt.Sprintf("ticket:%d", ticketID))
 
 ---
 
+## 退款（自行编排，v1.7.0+）
+
+退款流程的复杂度集中在**库的边界外**——审批工作流（draft → review → approved，可能多级）、金额计算（手续费扣除、按使用比例退、补偿券折抵）、退款记录的字段诉求、反向核销策略，每家业务都各不相同。本库刻意**不**做完整的退款编排 facade，只在协议层提供 `RefundGateway` 接口屏蔽渠道 SDK 差异，编排由调用方自行实现。
+
+### 与支付路径的对比
+
+| 维度 | 支付（`Engine[O]`） | 退款（业务方编排） |
+|---|---|---|
+| 必填依赖 | `Store` + `PaymentGateway` + `DelayQueue` + `StatusCache` + `StatusStream` | **`RefundGateway` 一个**（业务方持久化 / 编排自定义） |
+| 可选依赖 | `Locker` / `Worker` / 7 类钩子 | 业务方自行设计 |
+| 编排者 | 库内（`Engine.Create` / `HandleNotify` / `finalizeDelivery`） | **业务方** |
+| 库提供的事件 | `EventOrderCreated` / `Paid` / `Delivered` / `Closed` / `Cancelled` 等 | 无 —— 业务方自行埋点 |
+| 状态机 | `OrderStatus` 由库维护 | 业务方在自己的退款表上维护 |
+
+退款服务的 `go.mod` 传递依赖：仅 `orderflow` + `drivers/paymgrgw`——**不**带入 `go-redis` / `delayqueue` 子系统。
+
+### `RefundGateway` 接口
+
+```go
+type RefundGateway interface {
+    Refund(ctx, ch, RefundRequest) (RefundResponse, error)
+    QueryRefund(ctx, ch, outRefundNo string) (RefundQueryResult, error)
+    ParseRefundNotify(ctx, ch, *http.Request) (RefundNotifyResult, error)
+    AckRefundNotify(ch, w) error
+    IsIgnorableRefundError(ch, err error) bool
+}
+```
+
+`drivers/paymgrgw.Gateway` 的同一实例同时实现 `PaymentGateway` 与 `RefundGateway`：
+
+```go
+gateway := paymgrgw.New(paymgrManager)
+var _ orderflow.PaymentGateway = gateway   // 用于 Engine
+var _ orderflow.RefundGateway = gateway    // 用于退款服务
+```
+
+### 编排骨架（务必照抄）
+
+下面是完整可编译的最小编排示例（[`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)）。业务方按自己的 ORM / 表结构 / 反向核销策略替换 SQL 与字段，但**关键模式必须保留**：
+
+1. **事务 A 内 INSERT pending 记录** —— 业务自定义表（可与审批表合并），含审批后最终金额；
+2. **事务外调 `Gateway.Refund`** —— 网络 IO 不能持锁；
+3. **`IsIgnorableRefundError` 命中走对账路径** —— 渠道侧已存在退款单时调 `QueryRefund` 拿真实状态，不重复发起；
+4. **CAS UPDATE 落终态** —— `WHERE id = ? AND status IN ('pending', 'processing')` 防重放；
+5. **CAS winner 才触发反向核销** —— 重复回调时 `affected == 0`，跳过反向核销；
+6. **异步通知路径**：`ParseRefundNotify` → CAS UPDATE → 反向核销 → `AckRefundNotify`（落库失败不 ack，让网关重发）。
+
+```go
+type RefundService struct {
+    db      *sql.DB
+    gateway orderflow.RefundGateway
+}
+
+func (s *RefundService) Apply(ctx context.Context, a Application) error {
+    // Step 1：事务 A 内 INSERT pending（业务自定义表 / 字段）
+    if _, err := s.db.ExecContext(ctx,
+        `INSERT INTO business_refund_records
+           (id, order_no, channel, amount, total_amount, status, requested_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+        a.ID, a.OrderNo, a.Channel, a.Amount, a.OrderAmount, time.Now()); err != nil {
+        return fmt.Errorf("insert refund record: %w", err)
+    }
+
+    // Step 2：事务外调网关
+    resp, err := s.gateway.Refund(ctx, a.Channel, orderflow.RefundRequest{
+        OutTradeNo:   a.OrderNo,
+        OutRefundNo:  a.ID,
+        RefundAmount: a.Amount,    // 审批后的最终金额
+        TotalAmount:  a.OrderAmount,
+        Reason:       a.Reason,
+        NotifyURL:    "https://example.com/refund-notify",
+    })
+    if err != nil {
+        if s.gateway.IsIgnorableRefundError(a.Channel, err) {
+            return s.reconcile(ctx, a)
+        }
+        return fmt.Errorf("gateway refund: %w", err)
+    }
+
+    // Step 3：记录网关返回的退款单号；终态等异步通知 / 主动 Query 推进
+    _, err = s.db.ExecContext(ctx,
+        `UPDATE business_refund_records SET gateway_refund_id = ?, status = 'processing'
+         WHERE id = ? AND status = 'pending'`,
+        resp.GatewayRefundID, a.ID)
+    return err
+}
+
+func (s *RefundService) HandleNotify(ctx context.Context, ch orderflow.Channel,
+    w http.ResponseWriter, r *http.Request) {
+
+    notify, err := s.gateway.ParseRefundNotify(ctx, ch, r)
+    if err != nil {
+        // 验签失败：返回非 200 让网关重发或人工排查；不 ack
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
+    if err := s.markResolved(ctx, notify.OutRefundNo, notify.Status,
+        notify.GatewayRefundID, notify.SucceededAt); err != nil {
+        // DB 写失败：不 ack，让网关重发
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    if err := s.gateway.AckRefundNotify(ch, w); err != nil {
+        log.Printf("ack refund notify: %v", err)
+    }
+}
+
+// markResolved 是 CAS 防重放的核心：affected==1 时才触发反向核销。
+func (s *RefundService) markResolved(ctx context.Context, refundID string,
+    status orderflow.RefundTradeStatus, gatewayRefundID string,
+    succeededAt time.Time) error {
+
+    res, err := s.db.ExecContext(ctx,
+        `UPDATE business_refund_records
+           SET status = ?, gateway_refund_id = ?, succeeded_at = ?
+         WHERE id = ? AND status IN ('pending', 'processing')`,
+        status, gatewayRefundID, succeededAt, refundID)
+    if err != nil {
+        return err
+    }
+    affected, _ := res.RowsAffected()
+    if affected == 0 {
+        return nil // 已处理过的回调，不重复触发反向核销
+    }
+
+    if status == orderflow.RefundTradeStatusSucceeded {
+        if err := s.revokeBenefits(ctx, refundID); err != nil {
+            // 反向核销失败：业务方自定义重试 / 告警策略
+            log.Printf("revoke benefits for refund %s: %v", refundID, err)
+        }
+    }
+    return nil
+}
+```
+
+### 金额可变（审批改金额）的处理
+
+`RefundRequest.RefundAmount` 字段应传入**审批后的最终金额**——若业务允许审批人调整退款金额（扣手续费、按使用比例退、补偿券折抵），调整由业务方在调用 `Refund` 之前完成，本字段不参与审批。
+
+典型场景：
+
+| 业务 | 金额计算 |
+|---|---|
+| 教育课程 | `amount = total * (1 - 已学课时 / 总课时)` |
+| 会员订阅 | `amount = total * (剩余天数 / 总天数) - 手续费` |
+| 数字商品 | `amount = 已下载 ? 0 : total` |
+| 打赏 / 虚拟币 | 业务规则决定，通常全额或不退 |
+
+### 部分退款 + 多次退款
+
+业务方在自己的退款记录表上累加 `SUM(amount) WHERE status='succeeded'` 跟踪累计已退金额，调用 `Refund` 前自行校验"本次金额 + 已退金额 ≤ 订单金额"。库不维护订单的累计退款字段，避免接口扩张。
+
+### 状态映射
+
+`RefundTradeStatus` 四值由 driver 内部映射渠道原始状态：
+
+| `RefundTradeStatus` | 含义 | 业务方处理 |
+|---|---|---|
+| `pending` | 已提交渠道，渠道侧尚未处理（少见） | 等回调 / 主动 Query |
+| `processing` | 渠道侧已受理，处理中 | 与 pending 等价处理 |
+| `succeeded` | 退款成功（终态） | CAS 推进 + 反向核销 |
+| `failed` | 退款失败（含关闭 / 异常 / 未知错误） | CAS 推进 + 通知客服 |
+
+业务方需要拿到渠道原始状态（如微信 SUCCESS / 支付宝 REFUND_PROCESSING）做精细化处理时，通过 `RefundQueryResult.Raw` / `RefundNotifyResult.Raw` 类型断言取回 SDK 原始结构。
+
+### 错误识别
+
+`IsIgnorableRefundError` 已识别的"渠道侧已处理"幂等错误：
+
+- 微信：`RESOURCE_ALREADY_EXISTS` / `DUPLICATE_REQUEST`
+- 支付宝：`ACQ.DUPLICATE_REFUND_REQUEST` / `ACQ.TRADE_HAS_REFUND_LIMIT`
+
+业务方观察到新的渠道幂等错误码需要纳入识别时，请提交 PR 补充 `drivers/paymgrgw/refund_gateway.go` 的 `IsIgnorableRefundError` 实现。
+
+---
+
 ## 上线前清单（必读必做）
 
 库代码本身已具备生产可用性，但以下 10 项是**业务方部署前必须完成**的工作——不做会让"看起来正常运行"的系统在真实流量下暴露漏洞或性能问题。建议作为 release 前的 checklist 逐条核对。
@@ -1129,8 +1308,9 @@ go worker.StartAll(ctx, engine)  // 三个 worker 一次起：CloseWorker / Clos
 - `v1.3.0`：移除 `*slog.Logger` 依赖，改为自定义 `orderflow.Logger` 接口（业务方自由包装日志框架）
 - `v1.4.0`：⚠ BREAKING——`OrderStatus` 数值布局重写、`PayMethod` / `ProductType` 改为 typed enum、`gormstore` 解耦内置账单 / 流水模型（`BillWriter` / `LogStore` 接口）、`FinalizeExtra` / `GenerateOrderNoFunc` 签名调整
 - `v1.5.0`：订单生命周期审计加固（OnPaid / DeliveryFallback / StatusCancelled 文档强化；`AnomalyDelayQueueCleanupFailed` 异常类别；`rediscache.WithLockerLogger` Option），`gormstore` 标准建表脚本降级为参考 schema（`examples/sql/reference_schema.sql`）
-- `v1.6.0`（**当前**）：⚠ BREAKING——`Store.CASConfirmPaid` / `CASReopenPaid` 加 `expectedAmount` 二级金额校验、`Store` 接口新增 `CASCancel` 方法。新增 `Engine.CancelByUser` API + `OnCancelled` 钩子 + `EventOrderCancelled` 事件 + `gormstore.ColumnMap.PayAmount` 字段
-- `v1.6.1`（**README 同步**）：补全 v1.5 / v1.6 的对外接口文档（`CancelByUser` / `OnCancelledHook` / 自定义 Store 升级路径）
+- `v1.6.0`：⚠ BREAKING——`Store.CASConfirmPaid` / `CASReopenPaid` 加 `expectedAmount` 二级金额校验、`Store` 接口新增 `CASCancel` 方法。新增 `Engine.CancelByUser` API + `OnCancelled` 钩子 + `EventOrderCancelled` 事件 + `gormstore.ColumnMap.PayAmount` 字段
+- `v1.6.1`：补全 v1.5 / v1.6 的对外接口文档（`CancelByUser` / `OnCancelledHook` / 自定义 Store 升级路径）
+- `v1.7.0`（**当前**）：新增退款流程的协议层抽象——`RefundGateway` 接口（5 方法）+ 4 个通用类型（`RefundRequest` / `RefundResponse` / `RefundQueryResult` / `RefundNotifyResult`）+ `RefundTradeStatus` 枚举 + `ErrRefundNotFound` sentinel；`drivers/paymgrgw.Gateway` 同时实现 `PaymentGateway` 与 `RefundGateway`。**零破坏性**——v1.6.x 用户升级无需任何代码改动。退款流程的审批、金额计算、持久化、反向核销均由调用方自行编排，详见上方「退款（自行编排）」章节
 
 发版与依赖维护规范见 [`drivers/RELEASING.md`](./drivers/RELEASING.md)。
 
