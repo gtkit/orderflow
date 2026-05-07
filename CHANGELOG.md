@@ -20,7 +20,7 @@
 
 > ⚠ **破坏性变更**（按 v1.6.0 / v1.4.0 先例：仓库当前无外部下游引用，仍按 v1 内 MINOR 升级 + 显式 BREAKING 标识发布；下游接入前请阅读以下条目）：`Engine.Create` 在入参校验段新增 `Product.Price > 0` 守护，原先 `Price = 0` / `Price` 负数会一路透传到 `OrderSpec.PayAmount` 再到 `gateway.UnifiedOrder` 的伪订单链路被关闭。
 >
-> 子模块同步发版：`drivers/gormstore/v1.3.3`、`drivers/rediscache/v1.1.5`、`drivers/rediszq/v1.0.8`（仅 `require orderflow` 升级，无源码改动）。
+> 子模块同步发版：`drivers/gormstore/v1.3.3`、`drivers/rediscache/v1.1.5`、`drivers/rediszq/v1.0.8`、`drivers/paymgrgw/v1.2.1`（仅 `require orderflow` 升级，无源码改动）。所有 driver 均需对齐 `require github.com/gtkit/orderflow v1.8.0`，避免下游同时引用 driver + 新 orderflow 时 MVS 选定旧版本。
 
 ### Changed
 - ⚠ **`Engine.Create` 新增 `Product.Price > 0` 强制校验**：`Product.Price <= 0` 直接返回 `ErrInvalidConfig: Product.Price must be > 0, got <n>`，**不会落库 / 入队 / 写缓存**。理由：
