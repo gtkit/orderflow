@@ -40,6 +40,17 @@ type fakeProvider struct {
 	notifyResp *paymgr.NotifyResult
 	notifyErr  error
 
+	refundResp *paymgr.RefundResponse
+	refundErr  error
+	refundGot  *paymgr.RefundRequest
+
+	queryRefundResp *paymgr.QueryRefundResponse
+	queryRefundErr  error
+	queryRefundGot  *paymgr.QueryRefundRequest
+
+	refundNotifyResp *paymgr.RefundNotifyResult
+	refundNotifyErr  error
+
 	ackCalled bool
 }
 
@@ -66,12 +77,20 @@ func (p *fakeProvider) CloseOrder(_ context.Context, req *paymgr.CloseOrderReque
 	return p.closeErr
 }
 
-func (p *fakeProvider) Refund(_ context.Context, _ *paymgr.RefundRequest) (*paymgr.RefundResponse, error) {
-	return nil, errors.New("fakeProvider.Refund not used by paymgrgw tests")
+func (p *fakeProvider) Refund(_ context.Context, req *paymgr.RefundRequest) (*paymgr.RefundResponse, error) {
+	p.refundGot = req
+	if p.refundErr != nil {
+		return nil, p.refundErr
+	}
+	return p.refundResp, nil
 }
 
-func (p *fakeProvider) QueryRefund(_ context.Context, _ *paymgr.QueryRefundRequest) (*paymgr.QueryRefundResponse, error) {
-	return nil, errors.New("fakeProvider.QueryRefund not used by paymgrgw tests")
+func (p *fakeProvider) QueryRefund(_ context.Context, req *paymgr.QueryRefundRequest) (*paymgr.QueryRefundResponse, error) {
+	p.queryRefundGot = req
+	if p.queryRefundErr != nil {
+		return nil, p.queryRefundErr
+	}
+	return p.queryRefundResp, nil
 }
 
 func (p *fakeProvider) ParseNotify(_ context.Context, _ *http.Request) (*paymgr.NotifyResult, error) {
@@ -82,7 +101,10 @@ func (p *fakeProvider) ParseNotify(_ context.Context, _ *http.Request) (*paymgr.
 }
 
 func (p *fakeProvider) ParseRefundNotify(_ context.Context, _ *http.Request) (*paymgr.RefundNotifyResult, error) {
-	return nil, errors.New("fakeProvider.ParseRefundNotify not used by paymgrgw tests")
+	if p.refundNotifyErr != nil {
+		return nil, p.refundNotifyErr
+	}
+	return p.refundNotifyResp, nil
 }
 
 func (p *fakeProvider) ACKNotify(w http.ResponseWriter) {

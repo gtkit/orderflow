@@ -21,4 +21,8 @@ var (
 	// ErrConcurrentCreate 当 Config.Locker 已注入但其他并发 Create 正持有同用户同商品的锁，
 	// 本次 Create 放弃。业务方应在 API 层把此错误翻译为 "操作太频繁，请稍后重试" 或等价提示。
 	ErrConcurrentCreate = errors.New("orderflow: concurrent create in progress")
+	// ErrRefundNotFound RefundGateway.QueryRefund / ParseRefundNotify 在网关侧找不到对应退款单。
+	// driver 实装方负责把渠道返回的"退款单不存在"类错误统一包成此 sentinel，调用方据此
+	// 决定走"DB 已 pending 但渠道侧从未受理"的兜底路径。
+	ErrRefundNotFound = errors.New("orderflow: refund not found")
 )

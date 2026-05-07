@@ -11,6 +11,11 @@
 //
 // 核心包对 gorm / go-redis / go-pay 等第三方库零依赖，基础设施实现封装在 drivers 子包里。
 //
+// 退款流程的协议层抽象（v1.7.0+）由 RefundGateway 接口（refund_gateway.go）提供，
+// driver 实装见 drivers/paymgrgw。退款的审批 / 金额计算 / 持久化 / 反向核销均由
+// 调用方自行编排——库内不引入 Refunder facade、不扩展 Store / OrderSnapshot 接口、
+// 不提供退款相关钩子或事件。详见主仓 README "退款（自行编排）" 章节。
+//
 // # 钩子错误处理策略
 //
 // 不同钩子的错误处理策略不同，接入方必须清楚各自的语义：
