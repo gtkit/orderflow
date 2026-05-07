@@ -121,12 +121,25 @@ type RefundRequest struct {
 
 // RefundResponse 是发起退款的同步响应。
 //
-// **关键字段是 Status**——业务方应据此判断本次同步调用是否已经达到终态：
-//   - 支付宝：同步成功即终态 succeeded（渠道侧立即完成退款），driver 应填 RefundTradeStatusSucceeded
-//   - 微信：同步成功通常是 processing（渠道侧后续异步处理），driver 应填 RefundTradeStatusProcessing
+// **关键字段是 Status**——业务方应据此判断本次同步调用是否已经达到终态。
 //
-// 业务方收到 Status==Succeeded 时可以立即触发反向核销；收到 Processing / Pending / Unknown 时
-// 应等待异步通知或主动 Query 推进，不要立即触发反向核销。
+// driver 实装方按"已知渠道行为模式"启发式填写：
+//   - 支付宝：同步成功通常即终态 succeeded（渠道侧立即完成退款）→ driver 填 Succeeded
+//   - 微信：同步成功通常是 processing（渠道侧后续异步处理）→ driver 填 Processing
+//   - 其他渠道：保守填 Processing 让业务方等异步通知 / 主动 Query
+//
+// **重要：`Status` 是启发式默认值，不是确定性映射**。底层 `paymgr.RefundResponse`
+// 当前不暴露原始 status 字段，driver 无法读取真实状态——只能按渠道历史行为约定填写。
+// 渠道行为如果发生变化（如支付宝增加风控审查导致同步成功 = processing），driver 默认值
+// 会与真实状态偏差。业务方应该：
+//
+//  1. 用 `Status.IsTerminal()` 判断而**不是**按渠道名硬编码——这样未来扩展或行为变化时
+//     业务代码无需修改即保持正确性
+//  2. 对状态准确性敏感的场景（如金额较大、审计严格），调用 Refund 后应主动 QueryRefund
+//     兜底拉真实状态再触发反向核销，不要完全信任 Status 字段
+//
+// 业务方收到 Status==Succeeded 时**可以**立即触发反向核销；收到 Processing / Pending /
+// Unknown 时**必须**等待异步通知或主动 Query 推进——把渠道异步通知当成事实真源。
 type RefundResponse struct {
 	// OutRefundNo 商户退款单号，与请求一致。
 	OutRefundNo string

@@ -22,7 +22,10 @@
 >
 > 子模块同步发版：`drivers/paymgrgw/v1.2.0`（实装 `RefundGateway`）。`drivers/gormstore` / `drivers/rediscache` / `drivers/rediszq` 本版无源码改动，**不**联动发版。
 >
-> ⚠ **接入限制说明（接入方必读）**：本版 `IsIgnorableRefundError` 已识别的渠道幂等错误码与 `mapRefundStatus` 的状态映射均基于阅读 `paymgr` 源码 + 经验推断，**未在生产环境穷举验证**。业务方在生产环境观察到未识别的渠道错误码或状态字面量时，请提交 PR 补充 driver 实现。文档「错误识别」章节给出了"未识别错误时主动 Query 兜底"的临时缓解模板。
+> ⚠ **接入限制说明（接入方必读）**：
+> - `IsIgnorableRefundError` 已识别的渠道幂等错误码与 `mapRefundStatus` 的状态映射均基于阅读 `paymgr` 源码 + 经验推断，**未在生产环境穷举验证**——业务方在生产环境观察到未识别的渠道错误码或状态字面量时，请提交 PR 补充 driver 实现
+> - `RefundResponse.Status` 由 driver 按"已知渠道行为模式"启发式填写（alipay 同步成功 = succeeded、wechat 同步成功 = processing），**不是确定性映射**——业务方必须用 `Status.IsTerminal()` 判断而不是按渠道名硬编码业务分支
+> - 业务方接入前**必读** README「退款上线清单」章节并逐项核对（PK 冲突识别、并发累加校验、Channel 持久化、`ParseRefundNotify` 业务侧二次校验、反向核销失败 outbox 模式、对账 worker、监控指标、真实沙箱联调）
 
 ### Added
 - 新增 `RefundGateway` 接口（[`refund_gateway.go`](./refund_gateway.go)），包含 `Refund` / `QueryRefund` / `ParseRefundNotify` / `AckRefundNotify` / `IsIgnorableRefundError` 5 方法，与 `PaymentGateway` 并列，让一个 driver 实例可同时实现两个接口
@@ -37,11 +40,33 @@
 - `drivers/paymgrgw.Gateway.Refund` 同步返回的 `RefundResponse.Status` 按渠道行为契约填写（`syncRefundStatus`）：支付宝 → succeeded（同步即终态），微信 / 其他渠道 → processing（等异步通知）；业务方据 `Status.IsTerminal()` 决定是否立即触发反向核销
 - `drivers/paymgrgw` 的 `mapRefundStatus`：`paymgr.RefundStatusAbnormal`（"需人工介入"）→ `RefundTradeStatusUnknown`（**非终态**，避免误触发反向核销）；`paymgr` 暂未识别的状态字面量 → `RefundTradeStatusUnknown`，让业务方告警识别 SDK 升级 / 新渠道行为，不会静默落入终态
 - `drivers/paymgrgw` 实装 `IsIgnorableRefundError`：识别微信 `RESOURCE_ALREADY_EXISTS` / `DUPLICATE_REQUEST`、支付宝 `ACQ.DUPLICATE_REFUND_REQUEST` / `ACQ.TRADE_HAS_REFUND_LIMIT` 等"渠道侧已处理"幂等错误码（基于源码 + 经验，未生产穷举验证）
-- 新增 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)：可编译的最小退款编排示例，含事务边界、CAS 防重放、按 `RefundResponse.Status.IsTerminal()` 分支处理同步终态 / 中间态、异步通知处理、反向核销骨架
+- 新增 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)：可编译的**企业生产级**最小退款编排示例，覆盖 9 项关键模式——
+  1. PK 冲突识别（INSERT 撞 unique key 走 reconcile 兜底，而非误报错）
+  2. 事务外调 Gateway.Refund（网络 IO 不持锁）
+  3. IsIgnorableRefundError 命中走对账路径
+  4. 未识别错误也尝试主动 Query 兜底（应对 driver 错误码清单不全）
+  5. 按 `Status.IsTerminal()` 分支处理同步终态 / 中间态（而非硬编码渠道名）
+  6. CAS UPDATE 防重放（WHERE status IN ('pending', 'processing')）
+  7. CAS winner 才触发反向核销
+  8. 反向核销失败入 outbox 重试队列（`enqueueRevokeRetry`），独立 worker 重试 + 阈值告警，**不**仅日志（避免静默丢核销）
+  9. ParseRefundNotify 后业务侧二次校验（channel / amount / record 存在性）防伪造 + 防错配
 
 ### Changed
 - README 「适用场景 ✅ 适用」清单加入"退款（自行编排）"，明确库提供协议层抽象，编排由调用方实现
-- README 新增「退款（自行编排，v1.7.0+）」章节（位于「运维 / 后台 API」与「上线前清单」之间），覆盖：库为何不做完整退款编排、`RefundGateway` 接口签名、与 `Engine` 的依赖差异表、可抄的最小编排骨架（事务边界 + 按 `Status.IsTerminal()` 分支 + 异步通知）、金额可变（审批改金额）的处理、部分退款 + 多次退款的累加策略、状态映射表（含 unknown 非终态语义）、`RefundResponse.Status` 渠道行为契约、错误识别清单 + "未识别错误主动 Query 兜底"临时缓解模板
+- README 新增「退款（自行编排，v1.7.0+）」章节（位于「运维 / 后台 API」与「上线前清单」之间）按企业生产级标准覆盖：
+  - 库为何不做完整退款编排
+  - `RefundGateway` 接口签名 + 与 `Engine` 的依赖差异表
+  - 编排骨架（PK 冲突识别 + 事务边界 + 双重错误兜底 + `Status.IsTerminal()` 分支 + CAS 防重放 + outbox 反向核销 + 异步通知业务校验）—— 9 项关键模式
+  - 金额可变（审批改金额）的处理
+  - **并发退款的累加 race 防护**（SELECT FOR UPDATE / DB CHECK 约束方案）
+  - **反向核销失败的 outbox 模式**（含 retry 队列表 schema + worker 模板，绝不能仅日志）
+  - **Channel 一致性**（业务方必须持久化原支付渠道，不从 HTTP 输入读）
+  - **ParseRefundNotify 后的业务侧二次校验**（channel / amount / record 一致性）
+  - 状态映射表（含 unknown 非终态语义）
+  - `RefundResponse.Status` 是启发式默认值的明确说明 + 业务方使用约束
+  - 错误识别清单 + "未识别错误主动 Query 兜底"临时缓解模板
+  - **生产建议监控指标清单**（9 个指标 + 告警阈值参考）
+  - **退款上线清单**（16 项 checklist 必读必做）
 - README 「里程碑与版本」章节追加 v1.7.0 条目
 - `doc.go` 包注释一行提及退款协议层支持
 - `drivers/paymgrgw/doc.go` 包注释同步说明 `Gateway` 同时实现两个接口

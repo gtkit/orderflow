@@ -1050,16 +1050,19 @@ var _ orderflow.PaymentGateway = gateway   // 用于 Engine
 var _ orderflow.RefundGateway = gateway    // 用于退款服务
 ```
 
-### 编排骨架（务必照抄）
+### 编排骨架（务必照搬）
 
-下面是完整可编译的最小编排示例（[`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)）。业务方按自己的 ORM / 表结构 / 反向核销策略替换 SQL 与字段，但**关键模式必须保留**：
+完整可编译的最小编排示例：[`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)。业务方按自己的 ORM / 表结构 / 反向核销策略替换 SQL 与字段，但**以下关键模式必须保留**——任一项简化都会在生产暴露 bug：
 
-1. **事务 A 内 INSERT pending 记录** —— 业务自定义表（可与审批表合并），含审批后最终金额；
+1. **PK 冲突识别 + reconcile 兜底** —— INSERT pending 撞 PK 冲突时是重试场景，应走 reconcile 拉真实状态，不重新发起；
 2. **事务外调 `Gateway.Refund`** —— 网络 IO 不能持锁；
-3. **`IsIgnorableRefundError` 命中走对账路径** —— 渠道侧已存在退款单时调 `QueryRefund` 拿真实状态，不重复发起；
-4. **CAS UPDATE 落终态** —— `WHERE id = ? AND status IN ('pending', 'processing')` 防重放；
-5. **CAS winner 才触发反向核销** —— 重复回调时 `affected == 0`，跳过反向核销；
-6. **异步通知路径**：`ParseRefundNotify` → CAS UPDATE → 反向核销 → `AckRefundNotify`（落库失败不 ack，让网关重发）。
+3. **`IsIgnorableRefundError` + 主动 Query 双重兜底** —— 已识别幂等错误走 reconcile；未识别错误也尝试一次 Query 兜底（应对 driver 错误码识别清单不全）；
+4. **`Status.IsTerminal()` 判断分支** —— **不要**按渠道名硬编码；用 IsTerminal 让业务代码在渠道行为变化时仍正确；
+5. **CAS UPDATE 防重放** —— `WHERE id = ? AND status IN ('pending', 'processing')`；
+6. **CAS winner 才触发反向核销** —— 重复回调时 `affected == 0`，跳过反向核销；
+7. **反向核销失败入 outbox 队列重试** —— **绝不能仅日志**；款项已发，权益必须回退（详见下方「反向核销失败的兜底」章节）；
+8. **ParseRefundNotify 后业务侧二次校验** —— 即便 driver 已验签，业务方仍应核对 channel / amount 与本地 record 一致（详见下方「ParseRefundNotify 后的业务校验」章节）；
+9. **异步通知路径**：ParseRefundNotify → 业务校验 → CAS UPDATE → 反向核销 → AckRefundNotify（落库失败不 ack，让网关重发）。
 
 ```go
 type RefundService struct {
@@ -1068,12 +1071,16 @@ type RefundService struct {
 }
 
 func (s *RefundService) Apply(ctx context.Context, a Application) error {
-    // Step 1：事务 A 内 INSERT pending（业务自定义表 / 字段）
-    if _, err := s.db.ExecContext(ctx,
+    // Step 1：尝试 INSERT pending；PK 冲突走 reconcile 兜底（重试场景）
+    _, err := s.db.ExecContext(ctx,
         `INSERT INTO business_refund_records
            (id, order_no, channel, amount, total_amount, status, requested_at)
          VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-        a.ID, a.OrderNo, a.Channel, a.Amount, a.OrderAmount, time.Now()); err != nil {
+        a.ID, a.OrderNo, a.Channel, a.Amount, a.OrderAmount, time.Now())
+    if err != nil {
+        if isPKConflict(err) {
+            return s.reconcile(ctx, a)
+        }
         return fmt.Errorf("insert refund record: %w", err)
     }
 
@@ -1090,13 +1097,17 @@ func (s *RefundService) Apply(ctx context.Context, a Application) error {
         if s.gateway.IsIgnorableRefundError(a.Channel, err) {
             return s.reconcile(ctx, a)
         }
+        // 缓解：未识别错误也尝试一次主动 Query 兜底（应对 driver 错误码清单不全）
+        if qres, qerr := s.gateway.QueryRefund(ctx, a.Channel, a.ID); qerr == nil && qres.Status != "" {
+            return s.markResolved(ctx, a.ID, qres.Status, qres.GatewayRefundID, qres.SucceededAt)
+        }
         return fmt.Errorf("gateway refund: %w", err)
     }
 
-    // Step 3：按渠道行为契约决定本地状态
-    //   - 支付宝：resp.Status == Succeeded（同步即终态），直接走 markResolved 触发反向核销
-    //   - 微信：resp.Status == Processing（等异步通知），CAS 推进到 processing
-    //   - Unknown：渠道返回需人工介入或未识别状态——不要直接落终态，等 Query / 异步通知推进
+    // Step 3：必须用 IsTerminal() 判断，不要按渠道名硬编码
+    //   - 同步终态（典型支付宝）：直接 markResolved 触发反向核销
+    //   - 中间态（典型微信）：推进到 status=resp.Status 等异步回调
+    //   - Unknown：非终态，等 Query / 异步通知，绝不触发反向核销
     if resp.Status.IsTerminal() {
         return s.markResolved(ctx, a.ID, resp.Status, resp.GatewayRefundID, time.Now())
     }
@@ -1114,6 +1125,12 @@ func (s *RefundService) HandleNotify(ctx context.Context, ch orderflow.Channel,
     if err != nil {
         // 验签失败：返回非 200 让网关重发或人工排查；不 ack
         http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
+    // 业务侧二次校验：channel / amount 一致性（防伪造、防错配）
+    if err := s.verifyNotify(ctx, ch, notify); err != nil {
+        http.Error(w, "verify failed", http.StatusBadRequest)
         return
     }
 
@@ -1147,15 +1164,24 @@ func (s *RefundService) markResolved(ctx context.Context, refundID string,
         return nil // 已处理过的回调，不重复触发反向核销
     }
 
-    if status == orderflow.RefundTradeStatusSucceeded {
-        if err := s.revokeBenefits(ctx, refundID); err != nil {
-            // 反向核销失败：业务方自定义重试 / 告警策略
-            log.Printf("revoke benefits for refund %s: %v", refundID, err)
+    if status != orderflow.RefundTradeStatusSucceeded {
+        return nil // 失败终态不需要反向核销
+    }
+
+    // CAS winner + status=succeeded：触发反向核销
+    // 失败必须入 outbox 重试，绝不能仅日志（款项已发，权益必须回退）
+    if err := s.revokeBenefits(ctx, refundID); err != nil {
+        if outboxErr := s.enqueueRevokeRetry(ctx, refundID, err); outboxErr != nil {
+            log.Printf("CRITICAL refund %s revoke + outbox both failed: %v / %v",
+                refundID, err, outboxErr)
+            return fmt.Errorf("post-refund revoke unrecoverable: %w", err)
         }
     }
     return nil
 }
 ```
+
+完整含 `verifyNotify` / `enqueueRevokeRetry` / `isPKConflict` 的实现见 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go)。
 
 ### 金额可变（审批改金额）的处理
 
@@ -1170,13 +1196,147 @@ func (s *RefundService) markResolved(ctx context.Context, refundID string,
 | 数字商品 | `amount = 已下载 ? 0 : total` |
 | 打赏 / 虚拟币 | 业务规则决定，通常全额或不退 |
 
-### 部分退款 + 多次退款
+### 部分退款 + 多次退款（并发累加校验）
 
-业务方在自己的退款记录表上累加 `SUM(amount) WHERE status='succeeded'` 跟踪累计已退金额，调用 `Refund` 前自行校验"本次金额 + 已退金额 ≤ 订单金额"。库不维护订单的累计退款字段，避免接口扩张。
+业务方在自己的退款记录表上累加 `SUM(amount) WHERE status='succeeded'` 跟踪累计已退金额，调用 `Refund` 前校验"本次金额 + 已退金额 ≤ 订单金额"。库不维护订单的累计退款字段，避免接口扩张。
+
+**⚠ 并发场景的累加 race**：两个客服同时审批同一订单的不同退款单时，两条路径各自查 `SUM(amount)` 都通过校验，但累加后超额。生产代码必须用以下任一方式防止：
+
+```sql
+-- 方式 1：在订单行上加锁（推荐 InnoDB）
+BEGIN;
+SELECT pay_amount, refunded_amount FROM orders WHERE order_no = ? FOR UPDATE;
+-- 应用层校验 refunded_amount + new_refund_amount <= pay_amount
+INSERT INTO business_refund_records (...) VALUES (...);
+UPDATE orders SET refunded_amount = refunded_amount + ? WHERE order_no = ?;
+COMMIT;
+```
+
+```sql
+-- 方式 2：用 DB 约束兜底（PostgreSQL CHECK / MySQL 8.0+ 生成列 + UNIQUE）
+ALTER TABLE orders
+  ADD CONSTRAINT chk_refund_not_overflow
+  CHECK (refunded_amount <= pay_amount);
+```
+
+不做并发保护 → 高并发场景必然出现累加超额 → 渠道侧拒绝退款（金额超限错误）→ 客服困惑 + 资损风险。
+
+### 反向核销失败的兜底（outbox 模式）
+
+**这是退款编排最容易出错的地方**。退款款项已经从渠道侧扣减发出，业务侧权益**必须**回退，否则用户白嫖造成资损。但反向核销失败的处理常被简化为"仅日志"，生产环境会丢核销动作。
+
+**生产级写法**：失败时入"反向核销重试队列"，独立 worker 周期重试 + 超过阈值告警人工介入。
+
+```go
+// 业务侧表（业务自定义）
+CREATE TABLE business_revoke_retry_queue (
+    refund_id        VARCHAR(64) NOT NULL PRIMARY KEY,
+    last_error       TEXT        NOT NULL,
+    retry_count      INT         NOT NULL DEFAULT 0,
+    next_attempt_at  DATETIME(3) NOT NULL,
+    created_at       DATETIME(3) NOT NULL DEFAULT NOW(),
+    INDEX idx_next_attempt (next_attempt_at)
+);
+```
+
+```go
+// CAS winner + status=succeeded 路径
+if err := s.revokeBenefits(ctx, refundID); err != nil {
+    if outboxErr := s.enqueueRevokeRetry(ctx, refundID, err); outboxErr != nil {
+        // outbox 也失败：本地数据严重不一致，CRITICAL 告警 + 强制人工介入
+        log.Printf("CRITICAL refund %s revoke + outbox both failed: %v / %v",
+            refundID, err, outboxErr)
+        return fmt.Errorf("post-refund revoke unrecoverable: %w", err)
+    }
+    // 入 outbox 成功，让 worker 重试，本路径返回成功
+}
+```
+
+独立 worker 进程：
+
+```go
+func (w *RevokeRetryWorker) Run(ctx context.Context) {
+    for {
+        rows, _ := w.db.QueryContext(ctx,
+            `SELECT refund_id, retry_count FROM business_revoke_retry_queue
+             WHERE next_attempt_at <= NOW() ORDER BY next_attempt_at ASC LIMIT 100`)
+        // 重试每一行：调 revokeBenefits；成功 → DELETE FROM queue；
+        // 失败 → UPDATE next_attempt_at = NOW() + 指数退避，retry_count++；
+        // retry_count >= 5 → 告警人工介入，不再自动重试
+    }
+}
+```
+
+**绝对禁止**：仅 log.Printf 不重试。
+
+### Channel 一致性（防错配）
+
+业务方**必须**在自己的退款记录表持久化原支付渠道（`channel` 列），调用 `Refund` / `QueryRefund` / `verifyNotify` 时**严格使用持久化的渠道值**——绝不从 HTTP 请求 / 用户输入读取 channel。
+
+错配后果：
+- 用户用支付宝支付，业务方误用微信调 `Refund` → 渠道侧返回 RESOURCE_NOT_EXISTS → driver 翻译为 ErrRefundNotFound → 业务方误判"渠道侧没收到"卡死人工介入
+- 异步通知场景：攻击者伪造一个"支付宝退款通知"发到微信通知端点 → driver 验签失败应该拒绝，但若未做业务侧校验则是潜在漏洞
+
+正确做法：
+
+```go
+// 退款记录表必须有 channel 列
+CREATE TABLE business_refund_records (
+    id        VARCHAR(64) NOT NULL PRIMARY KEY,
+    order_no  VARCHAR(64) NOT NULL,
+    channel   VARCHAR(32) NOT NULL,    -- 必须持久化原支付渠道
+    ...
+);
+
+// Refund 路径：从持久化 record 读 channel，不从外部输入读
+func (s *RefundService) Apply(ctx, a Application) error {
+    // a.Channel 应该是从订单/审批表读出来的，不是 HTTP body
+    return s.gateway.Refund(ctx, a.Channel, ...)
+}
+
+// HandleNotify 路径：HTTP 端点参数 ch 应该来自 URL path（不同渠道走不同 path），
+// 然后业务侧校验 ch == record.channel
+```
+
+### ParseRefundNotify 后的业务校验（必读）
+
+即便 driver 已经做了渠道侧验签，**业务方仍必须**做二次校验——这是企业生产级的**安全防线**：
+
+| 校验项 | 防什么 |
+|---|---|
+| `notify.Channel == record.Channel` | Channel 错配 / 跨渠道伪造攻击 |
+| `notify.RefundAmount == record.Amount` | 金额篡改攻击（驱动验签实现 bug 时的最后防线） |
+| `notify.OutRefundNo` 在本地存在对应 record | 完全伪造攻击 |
+| 可选：`notify.OutTradeNo == record.OrderNo` | 交叉验证退款单与订单的关联 |
+
+```go
+func (s *RefundService) verifyNotify(ctx, ch orderflow.Channel, n orderflow.RefundNotifyResult) error {
+    var record struct {
+        Channel string
+        Amount  int64
+        OrderNo string
+    }
+    err := s.db.QueryRowContext(ctx,
+        `SELECT channel, amount, order_no FROM business_refund_records WHERE id = ?`,
+        n.OutRefundNo).Scan(&record.Channel, &record.Amount, &record.OrderNo)
+    if err != nil {
+        return fmt.Errorf("load record: %w", err)
+    }
+    if orderflow.Channel(record.Channel) != ch {
+        return fmt.Errorf("channel mismatch: notify=%s local=%s", ch, record.Channel)
+    }
+    if n.RefundAmount != record.Amount {
+        return fmt.Errorf("amount mismatch: notify=%d local=%d", n.RefundAmount, record.Amount)
+    }
+    return nil
+}
+```
+
+校验失败：返回 4xx 让业务方人工排查 + 告警，**不**调 `AckRefundNotify`（让网关重发，业务方有机会修复后再 ack）。
 
 ### 状态映射
 
-`RefundTradeStatus` 五值由 driver 内部映射渠道原始状态。务必用 `IsTerminal()` 判断，不要硬编码：
+`RefundTradeStatus` 五值由 driver 内部映射渠道原始状态。**务必用 `IsTerminal()` 判断**，不要硬编码：
 
 | `RefundTradeStatus` | 终态？ | 含义 | 业务方处理 |
 |---|---|---|---|
@@ -1193,17 +1353,22 @@ func (s *RefundService) markResolved(ctx context.Context, refundID string,
 
 业务方需要拿到渠道原始状态（如微信 SUCCESS / 支付宝 REFUND_PROCESSING）做精细化处理时，通过 `RefundQueryResult.Raw` / `RefundNotifyResult.Raw` 类型断言取回 SDK 原始结构。
 
-### `RefundResponse.Status` 的渠道行为契约
+### `RefundResponse.Status` 是启发式默认值（不是确定性映射）
 
-`Refund` 同步调用返回的 `RefundResponse.Status` 由 driver 按渠道行为契约填写，业务方据此判断**是否要等异步通知**：
+`Refund` 同步调用返回的 `RefundResponse.Status` 由 driver 按"已知渠道行为模式"启发式填写——**不是确定性映射**。底层 `paymgr.RefundResponse` 当前不暴露原始 status 字段，driver 只能按渠道历史行为约定填写：
 
-| 渠道 | `RefundResponse.Status` | 业务方编排 |
+| 渠道 | `RefundResponse.Status` | 启发式依据 |
 |---|---|---|
-| 支付宝 | `succeeded`（同步即终态） | 直接走 `markResolved` 触发反向核销 |
-| 微信 | `processing`（等异步通知） | CAS 推进到 processing，等异步通知或 Query |
-| 其他 / 未识别渠道 | `processing`（保守默认） | 同微信路径 |
+| 支付宝 | `succeeded`（同步即终态） | 支付宝退款 API 同步成功通常是终态 |
+| 微信 | `processing`（等异步通知） | 微信 v3 退款 API 同步成功通常是中间态，等异步回调 |
+| 其他 / 未识别渠道 | `processing`（保守默认） | 不假设渠道行为，让业务方走异步路径 |
 
-业务方编排应用 `resp.Status.IsTerminal()` 判断，不要硬编码渠道名——这样未来扩展新渠道时无需改业务代码。
+**业务方使用约束**：
+
+1. ✅ **必须用 `Status.IsTerminal()` 判断**业务分支，绝不硬编码渠道名——这样未来渠道行为变化或新增渠道时业务代码无需修改即保持正确
+2. ✅ **对状态准确性敏感的场景**（金额较大、审计严格）应主动 `QueryRefund` 拉真实状态再触发反向核销，不完全信任本字段
+3. ❌ **不要假设** "调 Refund 拿到 succeeded → 渠道侧一定已退款" —— driver 启发式可能与真实状态偏差，把渠道异步通知当作事实真源
+4. 业务方观察到与真实渠道行为偏差时应提交 PR 修正 driver 实现
 
 ### 错误识别
 
@@ -1226,6 +1391,45 @@ if err != nil {
     return fmt.Errorf("gateway refund: %w", err)
 }
 ```
+
+### 监控指标（生产建议）
+
+库不强制特定的可观测性方案，但生产部署前业务方应至少埋点以下指标（任选 Prometheus / OpenTelemetry / 阿里云监控等）：
+
+| 指标 | 类型 | 告警阈值参考 |
+|---|---|---|
+| `refund_apply_total{status,channel}` | counter | succeeded 占比 < 95% 告警 |
+| `refund_apply_duration_seconds` | histogram | P99 > 5s 告警 |
+| `refund_gateway_call_total{result,channel}` | counter | error 率 > 1% 告警 |
+| `refund_status_unknown_total{channel}` | counter | **任何非零都告警**——意味着 driver 状态映射不全 |
+| `refund_pending_age_seconds` | histogram | P95 > 10 分钟告警（pending 卡住） |
+| `refund_revoke_failed_total` | counter | **任何非零都告警**——失败入 outbox 必须人工介入 |
+| `refund_revoke_outbox_pending` | gauge | > 0 持续 5 分钟告警 |
+| `refund_notify_verify_failed_total{reason}` | counter | **任何非零都告警**——可能是攻击或 channel 错配 |
+| `refund_amount_overflow_attempts_total` | counter | 累加超额尝试，> 0 告警审视并发保护 |
+
+业务方应该有**对账 worker**：定期扫描 `business_refund_records WHERE status='pending' AND requested_at < NOW() - INTERVAL '10 MINUTE'`，对每条调 `QueryRefund` 推进 → 防止 pending 无限期卡住。
+
+### 退款上线清单（必读必做）
+
+部署退款服务到生产前，逐条核对：
+
+- [ ] **DB 表结构**：业务自定义的 `business_refund_records` 表有 PK on `id`、INDEX on `(order_no)`、INDEX on `(status, requested_at)`、`channel` 列必填
+- [ ] **退款累加约束**：`orders.refunded_amount` 列 + DB 层 CHECK 约束 / 应用层 SELECT FOR UPDATE 防累加超额
+- [ ] **PK 冲突识别**：`isPKConflict` 按真实 DB 驱动实现（不是 strings.Contains 占位）
+- [ ] **outbox 重试队列**：`business_revoke_retry_queue` 表 + 独立 worker 进程 + 失败超阈值告警人工介入
+- [ ] **业务侧二次校验**：`verifyNotify` 校验 channel + amount + record 存在性
+- [ ] **Channel 持久化**：所有路径从持久化 record 读 channel，不从 HTTP 输入读
+- [ ] **对账 worker**：扫描长时间 pending 记录调 QueryRefund 推进，防卡住
+- [ ] **可观测性**：上面的 9 个监控指标至少埋点 5 个 + 配告警
+- [ ] **限流**：客服后台 / 退款 API 入口加 per-user / per-IP 速率限制（避免误操作 / 攻击打爆网关）
+- [ ] **超时**：所有 ctx 设合理 deadline（建议 Refund 30s / Query 10s），ctx cancel 时业务方有对账兜底
+- [ ] **日志脱敏**：`channel_response` / `last_error` 等字段如可能含 PII（手机号 / 银行卡号），日志输出前脱敏
+- [ ] **OutRefundNo 格式**：业务生成的退款单号符合渠道约束（≤ 64 字符、字母数字下划线，避免特殊字符）
+- [ ] **金额单位**：`RefundAmount` / `TotalAmount` 是分（int64），业务侧确保单位一致，不要传元（float）
+- [ ] **真实联调**：在沙箱 / 灰度环境跑过完整"下单 → 支付 → 部分退款 → 全额退款 → 异步通知"流程；不要只跑单元测试上生产
+- [ ] **回滚预案**：发现错误码识别不全、状态映射偏差等问题时，业务侧能快速降级到"未识别错误主动 Query 兜底"路径
+- [ ] **CHANGELOG 接入限制说明已读**：driver 的 `IsIgnorableRefundError` 与 `mapRefundStatus` 是基于经验的启发式实现，未生产穷举验证
 
 ---
 

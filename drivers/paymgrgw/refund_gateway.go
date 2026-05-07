@@ -174,11 +174,22 @@ func isRefundNotFound(ch orderflow.Channel, err error) bool {
 	return false
 }
 
-// syncRefundStatus 按渠道行为契约决定 RefundResponse.Status：
+// syncRefundStatus 按"已知渠道行为模式"启发式决定 RefundResponse.Status。
 //
-//   - 支付宝：同步成功 = 终态 succeeded（渠道侧立即完成退款）
-//   - 微信：同步成功 = processing（渠道侧后续异步处理，等异步通知或 Query）
+//   - 支付宝：同步成功通常 = 终态 succeeded（渠道侧立即完成退款）
+//   - 微信：同步成功通常 = processing（渠道侧后续异步处理，等异步通知或 Query）
 //   - 其他 / 未识别渠道：保守填 processing，业务方按 Query / 异步通知路径推进
+//
+// **重要：本函数返回值是启发式默认值，不是确定性映射**。底层 paymgr.RefundResponse
+// 当前不暴露原始 status 字段，本函数只能按渠道历史行为约定填写。渠道行为发生变化
+// 时（如支付宝引入风控异步审查、微信调整退款流程），返回值可能与真实状态偏差。
+//
+// 业务方使用约束：
+//
+//  1. **必须用 `Status.IsTerminal()` 判断**而不是按渠道名硬编码业务分支，确保未来
+//     渠道行为变化或新增渠道时业务代码保持正确
+//  2. 对状态准确性敏感的场景应调 QueryRefund 主动对账，不完全信任本字段
+//  3. 业务方观察到本函数与真实渠道行为偏差时应提交 PR 修正
 func syncRefundStatus(ch paymgr.Channel) orderflow.RefundTradeStatus {
 	switch ch {
 	case paymgr.ChannelAlipay:
