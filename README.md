@@ -1423,7 +1423,11 @@ LIMIT 100;
 
 部署退款服务到生产前，逐条核对：
 
-- [ ] **DB 表结构**：业务自定义的 `business_refund_records` 表有 PK on `id`、INDEX on `(order_no)`、INDEX on `(status, requested_at)`、`channel` 列必填；`status` 列必须支持 5 个取值 `pending` / `processing` / `succeeded` / `failed` / `unknown`（用 ENUM 时不要遗漏 unknown，否则 mapRefundStatus 返回 unknown 时 INSERT/UPDATE 失败）
+- [ ] **DB 表结构**：业务自定义的 `business_refund_records` 表参考 schema 见 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go) 文件头注释。关键约束：
+  - PK on `id`、INDEX on `(order_no)`、INDEX on `(status, requested_at)`
+  - `channel` 列必填（持久化原支付渠道防错配）
+  - `status` 列必须支持 5 个取值 `pending` / `processing` / `succeeded` / `failed` / `unknown`（用 ENUM 时不要遗漏 unknown，否则 mapRefundStatus 返回 unknown 时 INSERT/UPDATE 失败）
+  - **`succeeded_at` 列必须允许 NULL**——仅 succeeded 终态时填值，其他状态下零值 `time.Time{}` 在 NOT NULL 列上会被 MySQL 严格模式拒绝
 - [ ] **退款累加约束**：`orders.refunded_amount` 列 + DB 层 CHECK 约束 / 应用层 SELECT FOR UPDATE 防累加超额
 - [ ] **PK 冲突识别**：`isPKConflict` 按真实 DB 驱动实现（不是 strings.Contains 占位）
 - [ ] **outbox 重试队列**：`business_revoke_retry_queue` 表 + 独立 worker 进程 + 失败超阈值告警人工介入

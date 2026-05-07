@@ -22,6 +22,45 @@
 //  5. CAS UPDATE，WHERE status NOT IN ('succeeded', 'failed') 防终态被覆盖
 //  6. CAS winner 才触发反向核销；失败入 outbox 队列重试，**不**仅日志
 //  7. 异步通知路径：ParseRefundNotify → 业务校验（金额 / channel 一致性）→ CAS UPDATE → AckRefundNotify
+//
+// # 参考 schema（业务方按真实 DB 调整）
+//
+//	CREATE TABLE business_refund_records (
+//	    id                VARCHAR(64) NOT NULL PRIMARY KEY,    -- OutRefundNo 业务幂等键
+//	    order_no          VARCHAR(64) NOT NULL,                -- 原支付订单号
+//	    channel           VARCHAR(32) NOT NULL,                -- 原支付渠道（必持久化，防错配）
+//	    amount            BIGINT      NOT NULL,                -- 审批后的退款金额（分）
+//	    total_amount      BIGINT      NOT NULL,                -- 原订单总金额（分）
+//	    status            VARCHAR(16) NOT NULL DEFAULT 'pending',
+//	                                          -- 5 取值：pending/processing/succeeded/failed/unknown
+//	                                          -- 用 ENUM 时务必含 unknown，否则 mapRefundStatus
+//	                                          -- 返回 unknown 时 INSERT/UPDATE 失败
+//	    gateway_refund_id VARCHAR(64) NOT NULL DEFAULT '',     -- 渠道侧退款单号（如有）
+//	    succeeded_at      DATETIME(3) NULL,                    -- **必须允许 NULL**——仅 succeeded
+//	                                                              终态时填，其他状态零值导致 NOT NULL
+//	                                                              列拒绝（MySQL 严格模式）
+//	    last_error        TEXT        NULL,                    -- 最近一次失败的错误信息（可选）
+//	    requested_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+//	    updated_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+//	                                          ON UPDATE CURRENT_TIMESTAMP(3),
+//	    INDEX idx_order_no (order_no),
+//	    INDEX idx_status_requested (status, requested_at)
+//	);
+//
+//	-- 反向核销失败重试队列（详见 README "反向核销失败的兜底" 章节）
+//	CREATE TABLE business_revoke_retry_queue (
+//	    refund_id        VARCHAR(64) NOT NULL PRIMARY KEY,
+//	    last_error       TEXT        NOT NULL,
+//	    retry_count      INT         NOT NULL DEFAULT 0,
+//	    next_attempt_at  DATETIME(3) NOT NULL,
+//	    created_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+//	    INDEX idx_next_attempt (next_attempt_at)
+//	);
+//
+//	-- 累加防超额（详见 README "并发退款的累加校验" 章节）
+//	ALTER TABLE orders ADD COLUMN refunded_amount BIGINT NOT NULL DEFAULT 0;
+//	ALTER TABLE orders ADD CONSTRAINT chk_refund_not_overflow
+//	    CHECK (refunded_amount <= pay_amount);
 package main
 
 import (
