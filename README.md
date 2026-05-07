@@ -1408,13 +1408,22 @@ if err != nil {
 | `refund_notify_verify_failed_total{reason}` | counter | **任何非零都告警**——可能是攻击或 channel 错配 |
 | `refund_amount_overflow_attempts_total` | counter | 累加超额尝试，> 0 告警审视并发保护 |
 
-业务方应该有**对账 worker**：定期扫描 `business_refund_records WHERE status='pending' AND requested_at < NOW() - INTERVAL '10 MINUTE'`，对每条调 `QueryRefund` 推进 → 防止 pending 无限期卡住。
+业务方应该有**对账 worker**：定期扫描所有非终态退款记录调 `QueryRefund` 推进，防止中间状态卡住。SQL 模板：
+
+```sql
+SELECT id, channel FROM business_refund_records
+WHERE status IN ('pending', 'processing', 'unknown')
+  AND requested_at < NOW() - INTERVAL '10 MINUTE'
+LIMIT 100;
+```
+
+务必同时扫 `pending` / `processing` / `unknown` 三种状态——只扫 `pending` 会让等异步通知超时的 processing 与人工介入的 unknown 永远卡住。
 
 ### 退款上线清单（必读必做）
 
 部署退款服务到生产前，逐条核对：
 
-- [ ] **DB 表结构**：业务自定义的 `business_refund_records` 表有 PK on `id`、INDEX on `(order_no)`、INDEX on `(status, requested_at)`、`channel` 列必填
+- [ ] **DB 表结构**：业务自定义的 `business_refund_records` 表有 PK on `id`、INDEX on `(order_no)`、INDEX on `(status, requested_at)`、`channel` 列必填；`status` 列必须支持 5 个取值 `pending` / `processing` / `succeeded` / `failed` / `unknown`（用 ENUM 时不要遗漏 unknown，否则 mapRefundStatus 返回 unknown 时 INSERT/UPDATE 失败）
 - [ ] **退款累加约束**：`orders.refunded_amount` 列 + DB 层 CHECK 约束 / 应用层 SELECT FOR UPDATE 防累加超额
 - [ ] **PK 冲突识别**：`isPKConflict` 按真实 DB 驱动实现（不是 strings.Contains 占位）
 - [ ] **outbox 重试队列**：`business_revoke_retry_queue` 表 + 独立 worker 进程 + 失败超阈值告警人工介入
