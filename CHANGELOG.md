@@ -16,6 +16,16 @@
 
 ### Security
 
+## [1.8.1] - 2026-05-08
+
+> 工具脚本改进版本。**无 .go 源码改动、无 API / ABI 变化**——下游升级 v1.8.0 → v1.8.1 不需要任何代码改动。
+>
+> driver 本版不联动发版：driver 自身无源码改动，`require orderflow v1.8.0` 与 v1.8.1 在 MVS 下兼容，本仓的 `audit` 仍会提示"driver require 落后"——按工具/文档累积原则忽略，下次功能发版时一并升级 require。
+
+### Changed
+- `scripts/lint-all.sh` 新增——多 module 仓库 lint 入口。仓库根 `golangci-lint run ./...` **只扫根 module**，drivers/* 是独立 module 完全不会被扫到（且会因 "no go files to analyze" 报错），单跑根 lint 看到 0 issues 是"假绿"。本脚本逐 module cd + `golangci-lint run ./...`，沿用 `check-modules.sh` 的 MODULES 风格与输出约定；提供 `--quiet` 选项；任一 module 报错即退码非 0；缺 `golangci-lint` 退码 2 + 安装提示
+- `scripts/check-release.sh` 新增 Step 4 多 module lint 调用（`bash scripts/lint-all.sh --quiet`），与原 Step 1+2（go.mod 静态）/ Step 3（编译探针）/ 原 Step 4 现升为 Step 5（模块发版审计）串联——发版前一站式校验包含真实 lint，避免"假绿"
+
 ## [1.8.0] - 2026-05-07
 
 > ⚠ **破坏性变更**（按 v1.6.0 / v1.4.0 先例：仓库当前无外部下游引用，仍按 v1 内 MINOR 升级 + 显式 BREAKING 标识发布；下游接入前请阅读以下条目）：`Engine.Create` 在入参校验段新增 `Product.Price > 0` 守护，原先 `Price = 0` / `Price` 负数会一路透传到 `OrderSpec.PayAmount` 再到 `gateway.UnifiedOrder` 的伪订单链路被关闭。
