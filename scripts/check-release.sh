@@ -4,7 +4,9 @@
 # 校验项：
 #   1. driver 的 go.mod 不含 `replace github.com/gtkit/orderflow ...` 本地指令；
 #   2. driver 的 go.mod 不 require `github.com/gtkit/orderflow v0.0.0` 占位符；
-#   3. driver 的 go.sum 完整（GOWORK=off 下能跑 `go mod verify` + 编译探针）。
+#   3. driver 的 go.sum 完整（GOWORK=off 下能跑 `go mod verify` + 编译探针）；
+#   4. 全部 module（含 drivers/*）lint 通过——避免单跑根 lint "假绿"；
+#   5. 模块发版审计（自上次 tag 以来代码变更 / 依赖更新 / driver require 对齐）。
 #
 # 第 3 项是关键的"消费者视角"校验——本地开发期 workspace 的 replace 让 driver
 # 不需要 go.sum 也能跑测试，但下游 `go get` 拿到 driver 后必须能独立编译。
@@ -67,8 +69,21 @@ if [[ $failed -eq 0 ]]; then
     echo "OK: all drivers are release-ready (no local replace, no v0.0.0, GOWORK=off compiles)"
 fi
 
-# ---- Step 4: 模块发版审计 ----
-# 即使 driver 编译通过，也要看代码 / 依赖是否有更新但未发版的情况。
+# ---- Step 4: 多 module lint ----
+# 仓库根 `golangci-lint run ./...` 只扫根模块，drivers/* 完全不会被扫到——
+# 单跑根 lint 看到 0 issues 是"假绿"。lint-all.sh 逐 module cd + 跑，是真实
+# 的全仓 lint 入口。发版前必须通过。
+echo
+echo "---- multi-module lint ----"
+if ! bash "$(dirname "$0")/lint-all.sh" --quiet; then
+    echo "ERROR: at least one module has lint issues (run scripts/lint-all.sh for details)"
+    failed=1
+else
+    echo "OK: all modules pass lint."
+fi
+
+# ---- Step 5: 模块发版审计 ----
+# 即使 driver 编译通过 + lint 通过，也要看代码 / 依赖是否有更新但未发版的情况。
 # 这是发版前最容易遗漏的一步——单跑 check-modules.sh 也行。
 echo
 echo "---- module release audit ----"
