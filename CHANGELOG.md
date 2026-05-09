@@ -16,6 +16,17 @@
 
 ### Security
 
+## [1.10.0] - 2026-05-09
+
+> 依赖升级与统一发版脚本版本。根模块与所有 driver 子模块同步使用 `v1.10.0` 版本号发布：`v1.10.0`、`drivers/gormstore/v1.10.0`、`drivers/paymgrgw/v1.10.0`、`drivers/rediscache/v1.10.0`、`drivers/rediszq/v1.10.0`。
+
+### Added
+- 新增 `scripts/release-all.sh`，用于按同一版本号 dry-run / 创建 / 推送根模块与所有 driver 子模块的附注 tag，并在发版前检查工作区、远端同步、CHANGELOG 版本区段、重复 tag 与 `scripts/check-release.sh`。
+- `drivers/RELEASING.md` 改为统一版本号多 tag 发版指南，记录 `scripts/release-all.sh vX.Y.Z --push` 的标准流程。
+
+### Changed
+- `drivers/paymgrgw` 升级 `github.com/gtkit/go-pay` v1.3.2 → v1.4.0。上游恢复支付宝普通公钥模式支持（仅配置 `Config.AlipayPublicKey` 的商户无需被迫切换证书模式），同时保留 JSAPI 必填参数修复与退款单不存在时返回 `paymgr.ErrOrderNotFound` 的修复；`paymgrgw` 对外 API 不变。
+
 ## [1.9.0] - 2026-05-09
 
 > 多 module 标签策略统一版本。根模块与所有 driver 子模块同步使用 `v1.9.0` 版本号发布：`v1.9.0`、`drivers/gormstore/v1.9.0`、`drivers/paymgrgw/v1.9.0`、`drivers/rediscache/v1.9.0`、`drivers/rediszq/v1.9.0`。

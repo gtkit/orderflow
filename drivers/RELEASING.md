@@ -1,243 +1,171 @@
 # 发版指南（orderflow & drivers）
 
-> 本仓库是多 module 单仓库（monorepo）：根 `github.com/gtkit/orderflow` 是零依赖核心包，
-> `drivers/*` 各自是独立 Go module，各自独立 tag、独立版本。
+> 本仓库是多 module 单仓库（monorepo）：根 `github.com/gtkit/orderflow` 是核心包，`drivers/*` 各自是独立 Go module。
 >
-> 本指南覆盖**依赖维护**与**发版流程**全部操作。发版前请对照最后的清单逐项勾选。
+> 发布策略：**保留多 module，但统一一个 SemVer 版本号、多枚 Go module tag**。每次正式发布都同时创建根模块 tag 与所有 driver tag。
 
-## 模块拓扑
+## 模块与 Tag
 
+| 模块路径 | Tag 格式 |
+|---|---|
+| `github.com/gtkit/orderflow` | `vX.Y.Z` |
+| `github.com/gtkit/orderflow/drivers/gormstore` | `drivers/gormstore/vX.Y.Z` |
+| `github.com/gtkit/orderflow/drivers/paymgrgw` | `drivers/paymgrgw/vX.Y.Z` |
+| `github.com/gtkit/orderflow/drivers/rediscache` | `drivers/rediscache/vX.Y.Z` |
+| `github.com/gtkit/orderflow/drivers/rediszq` | `drivers/rediszq/vX.Y.Z` |
+
+子模块 tag 必须带目录前缀，这是 Go Module 多 module 仓库的硬性规则。版本号部分必须一致，例如 `v1.10.0` 对应：
+
+```text
+v1.10.0
+drivers/gormstore/v1.10.0
+drivers/paymgrgw/v1.10.0
+drivers/rediscache/v1.10.0
+drivers/rediszq/v1.10.0
 ```
-orderflow/                              module: github.com/gtkit/orderflow              tag: vX.Y.Z
-└── drivers/
-    ├── paymgrgw/                       module: .../drivers/paymgrgw                    tag: drivers/paymgrgw/vX.Y.Z
-    ├── gormstore/                      module: .../drivers/gormstore                   tag: drivers/gormstore/vX.Y.Z
-    ├── rediscache/                     module: .../drivers/rediscache                  tag: drivers/rediscache/vX.Y.Z
-    └── rediszq/                        module: .../drivers/rediszq                     tag: drivers/rediszq/vX.Y.Z
-```
-
-关键约束：
-
-- 根 `go.mod` **零第三方依赖**，不允许 `go get` 任何外部包进根模块。
-- driver `go.mod` **禁止出现** `replace github.com/gtkit/orderflow => ...`，由 `scripts/check-release.sh` 守门。
-- `go.work` **仅本地 / CI 生效**，发版后下游消费者不会读到它。
-- 所有 tag 必须是附注标签（`git tag -a`），消息使用简体中文。
-
-## 本地开发
-
-根目录 `go.work` 已把四个 driver 纳入 workspace，并通过 `replace github.com/gtkit/orderflow => .`
-让 driver 的 `require github.com/gtkit/orderflow vX.Y.Z` 解析到当前目录代码。根模块本身**不在**
-`use` 列表中，因此在仓库根目录校验核心包时必须显式使用 `GOWORK=off`。
-
-常规流程：
-
-```bash
-# 改核心代码
-GOWORK=off go test ./...
-
-# 改 driver
-cd drivers/gormstore && go test ./...
-```
-
-workspace 模式下不需要修改任何 driver 的 `go.mod`。
 
 ## 依赖维护
 
 ### 为 driver 新增或升级第三方依赖
 
-**必须在 driver 目录内操作**：
+必须在对应 driver 目录内操作：
+
+```bash
+cd drivers/paymgrgw
+GOWORK=off go get github.com/gtkit/go-pay@v1.4.0
+GOWORK=off go mod tidy
+```
+
+回到根目录后同步记录到 `CHANGELOG.md` 的 `[Unreleased]` 区段。若该依赖升级影响运行时行为，也要说明下游影响与兼容性。
+
+### driver 对核心包版本
+
+所有 driver 的 `go.mod` 应对齐当前统一版本，例如：
+
+```go
+require github.com/gtkit/orderflow v1.10.0
+```
+
+如果发版前需要先让 driver 获取新核心版本校验和，应先提交并推送 release commit，再创建根 tag，随后在 driver 中执行：
 
 ```bash
 cd drivers/gormstore
-go get gorm.io/gorm@v1.31.1
-go mod tidy
+GOWORK=off go mod download github.com/gtkit/orderflow@v1.10.0
+GOWORK=off go mod tidy
 ```
-
-回到根目录同步 workspace 锁：
-
-```bash
-go work sync
-```
-
-### 核心包依赖
-
-核心包 `github.com/gtkit/orderflow` 不引入任何第三方依赖。如果确实需要（例如 JSON
-场景），按 `AGENTS.md` 只允许 `github.com/gtkit/*`，并且必须在 CHANGELOG 标注。
 
 ## 版本号规则（SemVer 2.0.0）
 
-| 变更性质 | 核心 | driver |
-|---|---|---|
-| 修改核心导出 API 签名 / 行为 | MAJOR | 适配后至少 MINOR，破坏性适配 MAJOR |
-| 核心新增接口方法（driver 必须实现） | MAJOR | 所有相关 driver MAJOR |
-| 核心新增可选 Option / 新导出函数 | MINOR | driver 可不动 |
-| driver 内部 bugfix | — | PATCH |
-| driver 升级第三方主版本（如 gorm v1→v2） | — | MAJOR |
-| 文档修正、内部重构（不改行为） | PATCH | PATCH |
+全仓只选择一个版本号，取本次变更中最高影响级别：
 
-### v2+ 额外要求
+| 变更性质 | 版本递增 |
+|---|---|
+| 不兼容 API / 行为变更 | MAJOR |
+| 向后兼容的新能力、新 Option、依赖升级带来可见能力变化 | MINOR |
+| Bug 修复、文档修正、内部重构、工具脚本改进 | PATCH |
 
-升到 `v2.0.0` 及以上的模块，`go.mod` 的 module path 必须带 `/v2`、`/v3` 后缀：
+`v0.x.y` 开发期仍按“破坏性变更至少升 MINOR”的原则提醒下游。`v2.0.0+` 必须同步调整 module path 的 `/v2`、`/v3` 后缀。
 
-- 核心包：`module github.com/gtkit/orderflow/v2`
-- driver：`module github.com/gtkit/orderflow/drivers/gormstore/v2`
+## 统一发版流程
 
-目录需通过子目录（`v2/`）或主干分支提供该 major 版本，这是 Go Module 硬性规定。
+### 1. 整理变更与 CHANGELOG
 
-## 核心包发版流程
+- 确认所有变更已提交或准备提交。
+- 将 `CHANGELOG.md` 的 `[Unreleased]` 内容剪切到新版本区段，格式为 `## [X.Y.Z] - YYYY-MM-DD`。
+- 破坏性变更必须在版本条目顶部用 **⚠ 破坏性变更** 标注。
+- README / driver 文档涉及使用方式变化时必须同步更新。
 
-### 1. 落定代码与 CHANGELOG
-
-- 确认所有改动已合并到 `main`。
-- 将 `CHANGELOG.md` 的 `[Unreleased]` 区段剪切到新版本区段，附日期 `YYYY-MM-DD`。
-- 破坏性变更在条目顶部用 **⚠ 破坏性变更** 标注。
-
-### 2. 根目录跑全量检查
+### 2. 提交并推送 release commit
 
 ```bash
-GOWORK=off go vet ./...
-GOWORK=off golangci-lint run ./...
-GOWORK=off go test -race -count=1 -timeout=5m ./...
-GOWORK=off go test -bench=. -benchmem -count=3 ./...
-GOWORK=off go test -coverprofile=coverage.out ./...
+git status --short
+git add CHANGELOG.md drivers/*/go.mod drivers/*/go.sum scripts drivers/RELEASING.md
+git commit -m "chore(release): 准备 v1.10.0"
+git push gtkit main
 ```
 
-### 3. 打核心 tag 并推送
+### 3. Dry-run 检查统一发版
 
 ```bash
-git tag -a v1.1.0 -m "版本 v1.1.0
-
-主要变更：
-- feat: 新增 xxx
-- fix: 修复 xxx
-
-破坏性变更（如有）：
-- BREAKING CHANGE: xxx 已删除，请使用 yyy 替代
-"
-git push origin v1.1.0
+scripts/release-all.sh v1.10.0
 ```
 
-**核心 tag 必须先于 driver tag 推送**——driver 要 require 真实存在的核心版本。
+脚本会检查：
 
-## driver 发版流程
+- 版本号格式是否为 `vX.Y.Z`
+- 工作区是否干净
+- 当前分支是否与远端同步
+- `CHANGELOG.md` 是否已有对应版本区段
+- 本地和远端是否已存在同名 tag
 
-以 `drivers/gormstore` 为例，其它 driver 同理。
+默认 dry-run 只打印将创建的 tag，不会修改本地或远端。
 
-### 1. 升级 require 的核心版本
+### 4. 创建并推送全部 tag
 
 ```bash
-cd drivers/gormstore
-go get github.com/gtkit/orderflow@v1.1.0
-go mod tidy
+scripts/release-all.sh v1.10.0 --push
 ```
 
-### 2. 本地测试（workspace 生效）
+脚本会先创建并推送根 tag，然后自动将所有 driver 的 `require github.com/gtkit/orderflow` 对齐到本次版本；如 `go.mod` / `go.sum` 有变化，会自动提交 `chore(drivers): 对齐 orderflow v1.10.0` 并推送。随后脚本会先创建本地 driver tag，运行 `scripts/check-release.sh` 通过后，再推送所有 driver tag。
+
+脚本会创建并推送附注 tag：
+
+```text
+v1.10.0
+drivers/gormstore/v1.10.0
+drivers/paymgrgw/v1.10.0
+drivers/rediscache/v1.10.0
+drivers/rediszq/v1.10.0
+```
+
+Tag message 使用简体中文，禁止轻量标签。
+
+### 5. 发版后验证
 
 ```bash
-go test -race -count=1 ./...
+git ls-remote --tags --refs gtkit | awk '{sub("refs/tags/", "", $2); print $2}' | sort -V
+git status -sb
+scripts/check-modules.sh
 ```
 
-### 3. 脱离 workspace 再测一次
-
-**这是关键步骤**——模拟下游消费者的真实解析路径：
-
-```bash
-GOWORK=off go test -race -count=1 ./...
-```
-
-如果此步失败，通常意味着：
-
-- 漏升核心 tag 版本
-- 残留了本地 replace
-- 依赖了 workspace 里的其它未发布 driver
-
-### 4. 发版守门
-
-回到仓库根：
-
-```bash
-cd ../..
-scripts/check-release.sh
-```
-
-必须输出 `OK: all drivers' go.mod are release-ready`。
-
-### 5. 更新 driver CHANGELOG（若维护了独立 CHANGELOG）
-
-根 `CHANGELOG.md` 用 driver 范围条目统一记录即可，例如：
-
-```
-### Added
-- `drivers/gormstore`: 新增 `WithAutoMigrate` Option（#123）
-```
-
-### 6. 打 driver tag
-
-tag 名必须带目录前缀，这是 Go Module 多 module 仓库的硬性规定：
-
-```bash
-git tag -a drivers/gormstore/v1.1.0 -m "版本 drivers/gormstore/v1.1.0
-
-主要变更：
-- feat: 新增 xxx
-- fix: 修复 xxx
-"
-git push origin drivers/gormstore/v1.1.0
-```
-
-四个 driver 互不绑定，按需逐个发版。
+预期：远端 tag 集合包含本次统一版本；工作区干净；`check-modules.sh` 无需发版提示。
 
 ## 下游消费者视角
 
 ```go
-// go.mod
 require (
-    github.com/gtkit/orderflow v1.1.0
-    github.com/gtkit/orderflow/drivers/gormstore v1.1.0
+    github.com/gtkit/orderflow v1.10.0
+    github.com/gtkit/orderflow/drivers/gormstore v1.10.0
 )
 ```
 
-消费者只会拉入实际引用的 driver 的传递依赖，不使用的 driver（以及它们的 GORM / Redis /
-go-pay 等依赖）完全不会出现在依赖图中。
+下游只会拉入实际引用的 driver 传递依赖，不使用的 driver 依赖不会进入依赖图。
 
 ## 发版前自检清单
 
-核心包发版：
-
-- [ ] 根 `go.mod` 仍然零第三方依赖
-- [ ] `go vet` / `golangci-lint` / `go test -race` 全部通过
-- [ ] `CHANGELOG.md` 已追加本版本条目，日期正确
-- [ ] 破坏性变更已在 CHANGELOG 与 tag message 中明确标注
-- [ ] 所有导出 API 的 GoDoc 与 Example 测试齐全
-- [ ] tag 是附注标签（`git tag -a`），message 使用简体中文
-- [ ] tag 已推送到远端
-
-driver 发版：
-
-- [ ] driver `go.mod` 无 `replace github.com/gtkit/orderflow`
-- [ ] driver `require github.com/gtkit/orderflow` 指向**已推送**的正式 tag，不是 `v0.0.0`
-- [ ] `scripts/check-release.sh` 输出 OK
-- [ ] 已在 `GOWORK=off` 下跑过 `go test -race`
-- [ ] `CHANGELOG.md` 已追加 driver 维度的条目
-- [ ] driver tag 名带 `drivers/<name>/` 前缀
-- [ ] driver tag 是附注标签，message 使用简体中文
-- [ ] driver tag 已推送到远端
+- [ ] `CHANGELOG.md` 已追加本版本区段，日期正确
+- [ ] 使用方式变化已同步 README / driver 文档
+- [ ] driver `go.mod` 无本地 `replace github.com/gtkit/orderflow`
+- [ ] driver `require github.com/gtkit/orderflow` 指向本次统一版本或已发布的目标版本
+- [ ] `GOWORK=off go vet ./...` 通过
+- [ ] `bash scripts/lint-all.sh` 通过
+- [ ] `GOWORK=off go test -race -count=1 -timeout=5m ./...` 通过
+- [ ] `GOWORK=off go test -bench=. -benchmem -count=3 ./...` 通过
+- [ ] `GOWORK=off go test -coverprofile=coverage.out ./...` 通过
+- [ ] `scripts/check-release.sh` 通过
+- [ ] `scripts/release-all.sh vX.Y.Z` dry-run 通过
+- [ ] `scripts/release-all.sh vX.Y.Z --push` 已推送全部 tag
 
 ## 事故处理
 
-### 发错版本号
+### 发错版本号或漏发 tag
 
-**禁止重命名、删除、强制覆盖已推送的 tag**，下游可能已缓存。正确做法：
-
-- 打一个修复版本（例如 `v1.1.1` 或 `drivers/gormstore/v1.1.1`）。
-- 在 CHANGELOG 中说明该版本取代了错误版本。
+若 tag 已推送，原则上不要重命名、删除、强制覆盖；下游和 Go Proxy 可能已缓存。正确做法是打一个修复版本，并在 `CHANGELOG.md` 说明取代关系。
 
 ### driver tag 推了但核心 tag 忘推
 
-driver `require` 的核心版本此时在 proxy 中不存在，下游 `go get` 会失败。立刻推核心 tag；
-如果核心代码本身还没 ready，只能再打一个 driver 修复 tag 降级 require。
+driver `require` 的核心版本在 proxy 中不存在时，下游 `go get` 会失败。若核心代码 ready，立即推核心 tag；若不 ready，只能再打一个修复版本修正 driver 的 require。
 
 ### 敏感信息入库
 
-按 `AGENTS.md` 的事故响应流程：立即吊销密钥，从 Git 历史清除，记录到 `.harness/error-journal.md`。
-不要试图靠 tag / commit 删除来"掩盖"——推送过的内容视作已泄露。
+按 `AGENTS.md` 的事故响应流程处理：立即吊销密钥，从 Git 历史清除，并记录到 `.harness/error-journal.md`。
