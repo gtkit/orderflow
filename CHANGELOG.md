@@ -8,11 +8,6 @@
 
 ### Changed
 
-- `drivers/paymgrgw` 发版 `drivers/paymgrgw/v1.3.0`，包含两项升级：
-  - `require github.com/gtkit/go-pay` v1.2.1 → v1.3.1。上游 v1.3.0 已将支付宝底层 SDK 由 `smartwalle/alipay/v3` 切换至 `go-pay/gopay/alipay/v3`（OpenAPI v3 RESTful），`paymgr` 公开 API 100% 不变，paymgrgw 本层零代码改动、`go test -race` 全绿、覆盖率维持 90.9%；v1.3.1 修复支付宝 JSAPI 下单缺失 `product_code` / `op_app_id` 必填参数的问题。⚠ 接入方注意：上游 v1.3.0 起，支付宝**普通公钥模式**（仅设 `Config.AlipayPublicKey`、未配证书）已软降级为运行时错误，须切换至证书模式（`WithCertMode` / `WithCertModePaths`），详见 go-pay v1.3.0 升级指南。
-  - `require github.com/gtkit/orderflow` v1.8.0 → v1.8.1（对齐 latest core，避免下游 MVS 选定旧版本）。本次仍按 v1 内 MINOR 升级——paymgrgw 自身 .go 源码无改动，但通过依赖传递引入了支付宝渠道的运行时行为变化（普通公钥模式失效），用版本号信号显式提醒接入方阅读升级指南。
-- `drivers/paymgrgw` 发版 `drivers/paymgrgw/v1.3.1`：`require github.com/gtkit/go-pay` v1.3.1 → v1.3.2。上游 v1.3.2 是 PATCH 修复——`alipay.Provider.QueryRefund` 在「退款单不存在」场景下原本返回空响应（支付宝对不存在的退款单返回 HTTP 200 + 关键字段为空），导致下游 `errors.Is(err, paymgr.ErrOrderNotFound)` 永远 false；v1.3.2 让响应字段为空时显式返回 `ErrOrderNotFound`，与 `QueryOrder` 行为对齐。paymgrgw 的 `isRefundNotFound` 因此在支付宝渠道下真正生效，paymgrgw 本层零代码改动、覆盖率维持 90.9%。`paymgr` 公开 API 100% 不变。
-
 ### Deprecated
 
 ### Removed
@@ -20,6 +15,17 @@
 ### Fixed
 
 ### Security
+
+## [1.9.0] - 2026-05-09
+
+> 多 module 标签策略统一版本。根模块与所有 driver 子模块同步使用 `v1.9.0` 版本号发布：`v1.9.0`、`drivers/gormstore/v1.9.0`、`drivers/paymgrgw/v1.9.0`、`drivers/rediscache/v1.9.0`、`drivers/rediszq/v1.9.0`。
+>
+> 后续 driver 子模块不再独立递增版本号；每次发版均使用同一个 SemVer 版本号、多枚 Go module tag。
+
+### Changed
+- 全仓发布标签统一为同一版本号下的多枚 Go module tag，降低多 module 仓库的版本选择成本。
+- 所有 driver 子模块的 `require github.com/gtkit/orderflow` 对齐 `v1.9.0`，避免下游同时引用 driver 与核心模块时由 MVS 选定旧核心版本。
+- `drivers/paymgrgw` 升级 `github.com/gtkit/go-pay` v1.3.1 → v1.3.2。支付宝退款单不存在场景现在可识别为 `paymgr.ErrOrderNotFound`，使 `paymgrgw` 的退款不存在判断生效；`paymgr` 公开 API 不变。
 
 ## [1.8.1] - 2026-05-08
 

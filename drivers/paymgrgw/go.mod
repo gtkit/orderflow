@@ -4,5 +4,5 @@ go 1.26
 
 require (
 	github.com/gtkit/go-pay v1.3.2
-	github.com/gtkit/orderflow v1.8.1
+	github.com/gtkit/orderflow v1.9.0
 )
