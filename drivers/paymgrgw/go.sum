@@ -1,4 +1,4 @@
-github.com/gtkit/go-pay v1.2.1 h1:AGAMqhsqvqY516A14B+VFemWppL5zw6Nwgo9y7TFDKA=
-github.com/gtkit/go-pay v1.2.1/go.mod h1:hWG0hBJN7B8zKPGonU0+HhzhWGgoUboUGLCs0XDcM+Y=
-github.com/gtkit/orderflow v1.8.0 h1:fXXV2xujPr1/yET72Wb0uY1v4Iq6ywhUthksXQKBVCg=
-github.com/gtkit/orderflow v1.8.0/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
+github.com/gtkit/go-pay v1.3.1 h1:LW9/XoLU3QK13a0rpT8I0ISb7OLt5Ul20N+Du3REymw=
+github.com/gtkit/go-pay v1.3.1/go.mod h1:BRV/trTTnRVC34wK85N7xL8RGZ0TuZl/vuMeTMScprs=
+github.com/gtkit/orderflow v1.8.1 h1:XLI4dcrU1EDyPPf5UjhMbWad+qatUWvBXBENVEyF4Yg=
+github.com/gtkit/orderflow v1.8.1/go.mod h1:sgQkEDes6C5P9xqmEnRV2yDY9T/gqMGBNe+aQPKANDc=
