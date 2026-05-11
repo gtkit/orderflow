@@ -68,30 +68,77 @@
 
 ```text
 orderflow/
-├── orderflow.go       Engine[O] + Config[O] + New
-├── snapshot.go        OrderSnapshot 接口（业务 Order 必须实现）
-├── status.go          OrderStatus + 合法跃迁表
-├── spec.go            OrderSpec / ProductInfo / BillSpec
-├── store.go           Store[O] 接口 + LogEntry
-├── gateway.go         PaymentGateway + Channel + NotifyResult
-├── delayqueue.go      DelayQueue 接口
-├── cache.go           StatusCache + StatusStream + Subscription
-├── locker.go          Locker 接口（可选）
-├── hooks.go           业务钩子函数类型
-├── events.go          ClosedReason + AnomalyKind 枚举
-├── errors.go          sentinel 错误
-├── ordernum.go        默认 OrderNo / OrderToken 生成器
-├── requests.go        CreateRequest / CreateResult / Timeline
-├── engine_lifecycle.go  Create / closeSuperseded / requestPayment
-├── engine_notify.go   HandleNotify / handleClosedPaidNotify / finalizeDelivery
-├── engine_close.go    Close / CloseByUser / ReconcilePaid
-├── engine_query.go    PollStatus / Timeline / ListUserOrders / Subscribe
-├── worker/            CloseWorker / CloseFallback / DeliveryFallback + StartAll
-└── drivers/
-    ├── paymgrgw/      PaymentGateway via github.com/gtkit/go-pay
-    ├── gormstore/     Store[O] via GORM（双泛型 Store[O, M]）
-    ├── rediscache/    StatusCache + StatusStream + Locker via go-redis
-    └── rediszq/       DelayQueue via Redis ZSET 双集合租约
+├── doc.go                         # 包级 GoDoc：说明适用场景、钩子策略、履约时序、安全边界
+├── orderflow.go                   # Engine[O]、Config[O]、默认配置、构造函数与配置校验入口
+├── snapshot.go                    # OrderSnapshot 只读接口：业务订单模型接入核心包必须实现的方法集
+├── status.go                      # OrderStatus 枚举、状态文本、终态判断与合法状态跃迁表
+├── spec.go                        # OrderSpec、ProductInfo、BillSpec 等创建订单与账单写入的数据契约
+├── requests.go                    # CreateRequest、CreateResult、StatusResult、Timeline 等对外请求/响应类型
+├── store.go                       # Store[O] 持久化接口与 LogEntry 流水结构，定义读写、CAS、履约事务能力
+├── gateway.go                     # PaymentGateway、Channel、NotifyResult 等支付网关抽象与回调解析契约
+├── refund_gateway.go              # RefundGateway 退款网关抽象，屏蔽微信/支付宝等渠道退款差异
+├── refund_types.go                # RefundRequest、RefundResponse、RefundQueryResult、退款状态与错误类型
+├── delayqueue.go                  # DelayQueue 延时关单队列接口，定义入队、租约取出、Ack 与重投递能力
+├── cache.go                       # StatusCache、StatusStream、Subscription：状态轮询缓存与实时订阅接口
+├── locker.go                      # Locker 分布式锁接口，用于串行化同一用户/商品的并发创建请求
+├── hooks.go                       # OnCreated、OnPaid、OnDelivered、OnClosed、OnCancelled 等业务钩子类型
+├── events.go                      # ClosedReason 与 AnomalyKind 枚举，供日志、钩子和监控分类使用
+├── errors.go                      # ErrInvalidConfig、ErrOrderNotFound、ErrOrderForbidden 等 sentinel 错误
+├── logger.go                      # Logger、Field、LogLevel 与 nopLogger，定义核心包结构化日志边界
+├── observer.go                    # Observer 观测接口与事件类型，用于接入指标、审计与运行态监控
+├── ordernum.go                    # 默认订单号与订单 token 生成器，包含随机 token 熵源实现
+├── helpers.go                     # 核心包内部小型辅助函数，承载可复用的私有实现细节
+├── paymethod.go                   # PayMethod typed enum：微信、支付宝、银联等支付方式语义值
+├── producttype.go                 # ProductType typed enum：文本、视频、音频、会员等商品类型语义值
+├── engine_lifecycle.go            # Engine.Create 主流程、旧 Pending 单复用/替换、请求支付网关下单
+├── engine_notify.go               # Engine.HandleNotify、关闭后支付恢复、履约 finalize 与异常回调处理
+├── engine_close.go                # Close、CloseByUser、CancelByUser、CloseByAdmin、ReconcilePaid 与兜底查询
+├── engine_query.go                # PollStatus、Timeline、ListUserOrders、Subscribe 等查询与订阅读路径
+├── engine_healthy.go              # Engine.Healthy readiness 探测，聚合 Store/Cache/Stream/DelayQueue/Locker 健康状态
+├── engine_close_test.go           # 关单、用户取消、管理员关单、补偿路径的单元测试
+├── engine_create_test.go          # 创建订单、复用/替换 Pending、配置校验与支付请求路径测试
+├── engine_notify_test.go          # 支付回调、关闭后支付恢复、金额/流水异常与履约失败测试
+├── engine_query_test.go           # 轮询、流水、用户订单列表与订阅读路径测试
+├── engine_healthy_test.go         # Healthy 聚合探测与依赖失败场景测试
+├── hooks_panic_test.go            # 钩子 panic recover 与日志告警行为测试
+├── *_test.go                      # 其他核心类型、错误路径、并发/chaos、示例与 benchmark 测试
+├── example_test.go                # 可被 `go test` 校验并展示在 GoDoc 的 Example 示例
+├── bench_test.go                  # Benchmark 与 ReportAllocs，用于评估核心路径分配与性能
+├── worker/
+│   ├── doc.go                     # worker 子包 GoDoc：说明三个后台 worker 的职责与退出方式
+│   ├── runner.go                  # StartAll：统一启动 CloseWorker、CloseFallback、DeliveryFallback
+│   ├── options.go                 # worker 运行参数、轮询间隔、批量大小、租约等配置选项
+│   ├── close_worker.go            # CloseWorker：消费 DelayQueue 到期任务并调用 Engine.Close
+│   ├── close_fallback.go          # CloseFallback：扫描 DB 中过期 Pending 订单，兜底延时队列漏投递
+│   ├── delivery_fallback.go       # DeliveryFallback：扫描 Paid 未履约订单并调用 Engine.ReconcilePaid 重试履约
+│   ├── stats.go                   # worker 统计快照，便于测试和运行态观测
+│   └── *_test.go                  # worker 启停、兜底扫描、租约处理、统计与取消场景测试
+├── drivers/
+│   ├── README.md                  # driver 总览：模块边界、版本关系、接入与测试约定
+│   ├── RELEASING.md               # driver 独立 module 的发布、tag、replace 清理与自检流程
+│   ├── gormstore/                 # GORM Store[O] 实现：订单表、账单表、日志表、事务履约与自定义列映射
+│   ├── paymgrgw/                  # go-pay/paymgr 网关适配：统一下单、关单、查单、支付/退款回调解析
+│   ├── rediscache/                # go-redis 实现：状态缓存、Pub/Sub 状态流、分布式锁、OnPaid 幂等保护
+│   └── rediszq/                   # Redis ZSET 延时队列实现：ready/inflight 双集合、租约、Ack 与重投递
+├── examples/
+│   └── refund_quickstart/         # 退款自行编排示例：展示 RefundGateway 与业务退款记录/反向核销组合方式
+├── scripts/
+│   ├── lint-all.sh                # 多 module lint 入口，覆盖根 module 与 drivers/* 独立 module
+│   ├── check-modules.sh           # 检查 driver module 的 go.mod、replace、版本依赖等发布前约束
+│   ├── check-release.sh           # 发版前一键校验：driver readiness、lint 与模块审计
+│   └── release-all.sh             # 多 module 发布辅助脚本，按仓库约定统一处理 tag/release 流程
+├── .harness/                      # Harness 规范、Guide 与 error journal，约束包结构、错误、测试和文档质量
+├── .openspec-auto/                # OpenSpec 自动工作流状态，记录当前变更上下文与流程元信息
+├── .claude/                       # Claude/OpenSpec hook 与本地设置，用于自动注入项目流程约束
+├── .codex/                        # Codex/OpenSpec hook 与配置追加片段，用于本地 agent 工作流集成
+├── tools/openspec/                # OpenSpec hook 共用脚本、变更识别、健康检查与仓库校验工具
+├── AGENTS.md                      # Codex/agent 项目级规则：Go 包质量、OpenSpec、文档、发布、安全要求
+├── CLAUDE.md                      # Claude 项目级规则，通常与 AGENTS.md 保持同等约束语义
+├── README.md                      # 用户入口文档：适用场景、架构、接入步骤、流程图、运维和升级说明
+├── CHANGELOG.md                   # Keep a Changelog 格式的用户可见变更记录，与 SemVer tag 强绑定
+├── go.mod                         # 根 module：github.com/gtkit/orderflow，仅包含核心包依赖声明
+├── go.work                        # 本地多 module 工作区，串联根 module 与 drivers/* 子 module 开发
+└── go.work.sum                    # go.work 依赖校验和，记录工作区解析出的模块校验信息
 ```
 
 ---
@@ -118,6 +165,7 @@ orderflow/
 | `OnPaid` | [`hooks.go`](./hooks.go) | **阻断 finalize**，订单停在 Paid，fallback worker 重试 |
 | `OnDelivered` | [`hooks.go`](./hooks.go) | WARN 日志，不阻断 |
 | `OnClosed` | [`hooks.go`](./hooks.go) | 旁路观察，无返回值 |
+| `OnCancelled` | [`hooks.go`](./hooks.go) | 用户主动取消后的旁路观察，无返回值 |
 | `OnReopened` | [`hooks.go`](./hooks.go) | 旁路观察，仅在"关闭后又支付成功"路径触发 |
 | `OnSuperseded` | [`hooks.go`](./hooks.go) | 旁路观察 |
 | `OnAnomaly` | [`hooks.go`](./hooks.go) | 旁路观察，典型对接告警 |
@@ -745,6 +793,8 @@ sequenceDiagram
 | `UnexpectedStatus` | 进入状态机未覆盖的分支 | 告警 |
 | `DeliveryFailed` | `OnPaid` 或 `FinalizePaidOrder` 失败 | 订单停在 Paid，`DeliveryFallback` 补偿 |
 | `GatewayQueryFailed` | 查询网关 3 次重试全失败 | 不尝试恢复，人工对账 |
+| `MalformedPaidNotify` | Paid 回调缺 `TransactionID` 或 `TotalAmount<=0` | 不查 DB / 不推进，等 fallback scanner 兜底 |
+| `DelayQueueCleanupFailed` | 订单 Paid 后清理延时关单队列失败 | 告警，CloseWorker 二次拉取做幂等 skip |
 
 ### 履约失败的兜底路径
 
@@ -913,9 +963,9 @@ CAS Pending -> Paid   (Store.CASConfirmPaid)
 Engine **不做用户身份鉴权**，假设所有传入的 `userID` 已经来自业务侧的鉴权上下文。
 
 - **`CreateRequest.UserID`** 必须从 JWT / Session 解出，不得从 HTTP body / query / header 直接透传。否则攻击者可传他人 UserID，通过 `FindPendingByUserAndProduct` 找到受害者订单并 `closeSuperseded` 关闭（DoS）。
-- **`PollStatus` / `Timeline` / `CloseByUser` 的 `userID`** 同样必须来自鉴权上下文。Engine 内部基于此做归属校验（`ErrOrderForbidden`）；HTTP query 直接透传等于校验形同虚设。
+- **`PollStatus` / `Timeline` / `CloseByUser` / `CancelByUser` 的 `userID`** 同样必须来自鉴权上下文。Engine 内部基于此做归属校验（`ErrOrderForbidden`）；HTTP query 直接透传等于校验形同虚设。
 - **`ListUserOrders` 不做二次校验**，直接透传给 Store。调用方必须保证 `userID` 来自鉴权上下文。
-- **`Close(orderNo)`** 不做 UserID 校验，仅供后台 / worker 使用。开放给用户"主动取消"应用 `CloseByUser`；后台 / 风控强制关单使用 `CloseByAdmin`。
+- **`Close(orderNo)`** 不做 UserID 校验，仅供后台 / worker 使用。开放给用户"主动取消"用 `CancelByUser`；开放给用户"关闭过期订单"用 `CloseByUser`；后台 / 风控强制关单使用 `CloseByAdmin`。
 - **`HandleNotify`** 不依赖用户身份，但要求 `PaymentGateway.ParseNotify` 完成验签。
 
 ### Token 撤销 / 风控止血
@@ -967,6 +1017,23 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 ⚠ **鉴权强约束**：`userID` 必须来自鉴权后的可信身份（JWT Claims / Session），**禁止**直接接受请求体里的 `user_id`。Engine 内已校验 `order.UserID() == userID`，不匹配返回 `ErrOrderForbidden`。
 
 流程：身份校验 → 网关 `CloseOrder`（带重试 + 可忽略错误）→ `CASCancel` → `publishStatus` → `appendLog`（actor=`user`）→ `EventOrderCancelled` 事件 → `OnCancelled` 钩子。非 Pending 状态直接 skip 返回 nil（幂等）。
+
+```mermaid
+flowchart TD
+    A[业务 HTTP handler] --> B[从 JWT / Session 取得可信 userID]
+    B --> C[调用 Engine.CancelByUser]
+    C --> D[Store.GetByNo 读取订单]
+    D --> E{订单是否存在且归属 userID}
+    E -- 否 --> F[返回 ErrOrderNotFound / ErrOrderForbidden]
+    E -- 是 --> G{订单是否 Pending}
+    G -- 否 --> H[幂等 skip，返回 nil]
+    G -- 是 --> I[PaymentGateway.CloseOrder 关闭网关侧订单]
+    I --> J[Store.CASCancel: Pending → Cancelled]
+    J --> K[StatusCache.Set + StatusStream.Publish]
+    K --> L[Store.AppendLog actor=user]
+    L --> M[Observer 记录 EventOrderCancelled]
+    M --> N[OnCancelled 旁路钩子]
+```
 
 ```go
 // HTTP handler 示例

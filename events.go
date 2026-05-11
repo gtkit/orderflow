@@ -37,4 +37,9 @@ const (
 	// 对 Paid 订单做幂等 skip，正确性不受影响），仍可能产生多余的 close 路径事件 / 日志，
 	// 误导监控判断。需要运维感知 Redis / Queue 子系统的可用性。
 	AnomalyDelayQueueCleanupFailed AnomalyKind = "delay_queue_cleanup_failed"
+	// AnomalyMalformedPaidNotify Paid 状态的网关回调缺失关键字段（TransactionID 为空
+	// 或 TotalAmount <= 0）。Engine 会拒绝该回调并返回 nil 给网关，让 fallback scanner
+	// 通过 QueryOrder 走对账兜底路径。合法渠道（微信 / 支付宝 / Stripe 等）的 Paid 通知
+	// 必带这两字段——触发此异常多半意味着上游签名校验缺陷、伪造请求或 driver bug。
+	AnomalyMalformedPaidNotify AnomalyKind = "malformed_paid_notify"
 )

@@ -5,14 +5,19 @@
 ## [Unreleased]
 
 ### Added
+- 新增 `AnomalyMalformedPaidNotify` 异常类型，标识 Paid 状态网关回调缺失关键字段（`TransactionID` 为空或 `TotalAmount<=0`）的场景。`HandleNotify` 检测到后会拒绝该回调并返回 nil，让 fallback scanner 通过 `QueryOrder` 走对账兜底，避免污染 Bill 表 `trade_no` 列。
 
 ### Changed
+- 补充 README 目录结构中文注释，覆盖核心文件、worker、drivers、examples、脚本与本地工作流配置，并同步 `CancelByUser` 流程图与钩子表说明。
+- 更新包级 GoDoc 的用户取消钩子与鉴权边界说明，使 `doc.go` 与当前公开 API 保持一致。
+- `CancelByUser` 与 `CloseByAdmin` 在 `CASCancel` / `CASClose` 返回 `affected=0` 时复查订单当前状态并追加流水（与 `Close` 行为对齐），便于排查"支付回调抢跑"等竞态。仅新增日志，主流程返回值不变。
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+- 修正 `doc.go` 兜底唯一索引示例的 status 取值：`status=1` → `status=0`。`StatusPending` 实际值为 `0`（见 `status.go`），原示例建出的部分唯一索引永远不会匹配 Pending 行，"一用户一商品一 Pending" 的 DB 兜底形同虚设。README 的 PostgreSQL 示例与此一并对齐。
 
 ### Security
 

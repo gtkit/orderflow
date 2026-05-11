@@ -26,6 +26,7 @@
 //	OnPaid           | error         | 阻断 finalize 流程，订单停在 Paid，由 fallback worker 重试（必须幂等）
 //	OnDelivered      | error         | WARN 日志，不阻断，订单已 Delivered
 //	OnClosed         | (none)        | 旁路观察，无错误返回
+//	OnCancelled      | (none)        | 用户主动取消后的旁路观察，无错误返回
 //	OnReopened       | (none)        | ⚠ 触发后 Engine 立刻调 OnPaid——禁止在此发权益（详见 OnReopenedHook GoDoc）
 //	OnSuperseded     | (none)        | 旁路观察
 //	OnAnomaly        | (none)        | 旁路观察，用于告警/审计
@@ -67,8 +68,8 @@
 //     IdempotentOnPaidViaRedis（OnPaid 幂等保护）+ CloseSupersededPolicy=SupersededDegraded
 //     （网关抖动不阻塞用户下新单）。
 //   - DB 部分唯一索引：MySQL 8.0+ 推荐 ALTER TABLE orders ADD UNIQUE INDEX
-//     uk_pending_user_product ((CASE WHEN status=1 THEN CONCAT(user_id,'-',product_id) ELSE NULL END))，
-//     作为"一用户一商品一 Pending"的最终兜底。
+//     uk_pending_user_product ((CASE WHEN status=0 THEN CONCAT(user_id,'-',product_id) ELSE NULL END))，
+//     作为"一用户一商品一 Pending"的最终兜底（status=0 对应 StatusPending，见 status.go）。
 //   - worker goroutine：业务钩子 panic 会被 recover 吞掉，但必须检查日志关键字
 //     "orderflow: panic in ... recovered" 做告警。
 //   - "orderflow: ALERT ..." 开头的 ERROR 日志都值得配告警（异常订单、缓存不一致、
@@ -83,11 +84,11 @@
 //   - **CreateRequest.UserID 必须来自鉴权后的身份上下文**，不得从 HTTP body / query /
 //     header 直接读取。否则攻击者可传入他人 UserID，通过 FindPendingByUserAndProduct
 //     找到受害者的 Pending 订单并经 closeSuperseded 关闭（DoS）。
-//   - **PollStatus / Timeline 的 userID 参数**同样必须来自鉴权上下文。两方法内部基于
-//     此参数做归属校验（ErrOrderForbidden）；若业务把 HTTP query userID 直接透传，
-//     校验形同虚设。
+//   - **PollStatus / Timeline / CloseByUser / CancelByUser 的 userID 参数**同样必须来自鉴权上下文。
+//     这些方法内部基于此参数做归属校验（ErrOrderForbidden）；若业务把 HTTP query
+//     userID 直接透传，校验形同虚设。
 //   - **Close(orderNo)** 不做 UserID 归属校验，仅供后台/worker 调用。如果要开放给用户
-//     "主动取消订单"，业务方应自己先 GetByToken 拿 order 验 UserID 再调 Close。
+//     "主动取消订单"，应使用 CancelByUser；如果要开放"关闭过期订单"，应使用 CloseByUser。
 //   - **HandleNotify 不依赖用户身份**——但要求 PaymentGateway.ParseNotify 完成验签
 //     （见 gateway.go 的 PaymentGateway 接口文档）。
 //

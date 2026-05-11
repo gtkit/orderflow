@@ -49,6 +49,29 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 		)
 		return nil
 	}
+
+	// Paid 回调语义校验：合法渠道的 Paid 通知必带非空 TransactionID 与 TotalAmount > 0。
+	// 这里在 GetByNo 前拦截：避免恶意或畸形请求穿透到 DB / Bill 链路，污染 trade_no 列、
+	// 破坏对账。被拒绝的合法订单可通过 fallback scanner 的 QueryOrder 兜底恢复。
+	//
+	// 此处不调用 recordAnomaly：order 尚未查询，没有 O 上下文可传。直接走 logger +
+	// Observer.Event(EventAnomaly)；OnAnomaly 钩子在 order 未知时不触发（与 ALERT
+	// 类未关联订单的日志策略一致）。
+	if notify.TransactionID == "" || notify.TotalAmount <= 0 {
+		e.logger.Error(ctx, "orderflow: ALERT malformed paid notify",
+			String("out_trade_no", notify.OutTradeNo),
+			String("kind", string(AnomalyMalformedPaidNotify)),
+			Any("trade_no_empty", notify.TransactionID == ""),
+			Int64("total_amount", notify.TotalAmount),
+		)
+		e.observer.Event(ctx, EventAnomaly, notify.OutTradeNo, map[string]any{
+			"kind":           string(AnomalyMalformedPaidNotify),
+			"trade_no_empty": notify.TransactionID == "",
+			"total_amount":   notify.TotalAmount,
+		})
+		return nil
+	}
+
 	e.normalizeNotifyPaidAt(&notify)
 
 	order, found, err := e.store.GetByNo(ctx, notify.OutTradeNo)

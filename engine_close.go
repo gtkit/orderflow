@@ -165,6 +165,15 @@ func (e *Engine[O]) CancelByUser(ctx context.Context, userID int64, orderNo, rea
 	}
 	if affected == 0 {
 		// 状态被并发推进——常见情形：支付回调先到、其他实例先取消。skip。
+		// 复查并审计：与 Close 的 recheck 行为对齐，便于排查"取消失败但状态变了"竞态。
+		current, ok, qErr := e.store.GetByNo(ctx, orderNo)
+		if qErr != nil {
+			return fmt.Errorf("orderflow: recheck after cancel race: %w", qErr)
+		}
+		if ok {
+			e.appendLog(ctx, current, StatusPending, current.Status(), "user",
+				"cancel skipped: state changed concurrently to "+current.Status().String())
+		}
 		return nil
 	}
 
@@ -243,6 +252,15 @@ func (e *Engine[O]) CloseByAdmin(ctx context.Context, orderNo, reason string) er
 	}
 	if affected == 0 {
 		// 状态被并发推进——常见情形：支付回调先到。Close 路径的标准行为是 skip。
+		// 复查并审计：与 Close 的 recheck 行为对齐，便于排查"管理员关单失败但状态变了"竞态。
+		current, ok, qErr := e.store.GetByNo(ctx, orderNo)
+		if qErr != nil {
+			return fmt.Errorf("orderflow: recheck after admin close race: %w", qErr)
+		}
+		if ok {
+			e.appendLog(ctx, current, StatusPending, current.Status(), "admin",
+				"admin close skipped: state changed concurrently to "+current.Status().String())
+		}
 		return nil
 	}
 
