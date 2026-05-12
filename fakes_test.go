@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +76,7 @@ type fakeStore struct {
 
 	// Call counters
 	CreateCalls         int
+	GetByNoCalls        int
 	CASCloseCalls       int
 	CASCancelCalls      int
 	CASConfirmPaidCalls int
@@ -135,6 +137,7 @@ func (s *fakeStore) snapshot(o *testOrder) *testOrder {
 func (s *fakeStore) GetByNo(_ context.Context, orderNo string, _ ...string) (*testOrder, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.GetByNoCalls++
 	if s.ErrOnGet != nil {
 		return nil, false, s.ErrOnGet
 	}
@@ -693,31 +696,131 @@ type onSupersededCall struct {
 	NewProductID uint64
 }
 
+type onSupersededGatewayFailedCall struct {
+	OldOrderNo   string
+	NewProductID uint64
+	GatewayErr   error
+}
+
 type onAnomalyCall struct {
 	OrderNo string
 	Kind    AnomalyKind
 	Detail  string
 }
 
+// fakeObserver 记录所有 Observer.Event 调用，供测试断言。
+// 注意必须实现 nopObserver 之外的类型，否则 wrapObserver 会跳过包装、
+// 但这里直接注入到 Config.Observer，Engine 会用 safeObserver 包装。
+type observedEvent struct {
+	Kind    EventKind
+	OrderNo string
+	Attrs   map[string]any
+}
+
+type fakeObserver struct {
+	mu     sync.Mutex
+	Events []observedEvent
+}
+
+func (o *fakeObserver) Event(_ context.Context, kind EventKind, orderNo string, attrs map[string]any) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	cp := make(map[string]any, len(attrs))
+	for k, v := range attrs {
+		cp[k] = v
+	}
+	o.Events = append(o.Events, observedEvent{Kind: kind, OrderNo: orderNo, Attrs: cp})
+}
+
+func (o *fakeObserver) Duration(_ context.Context, _ string, _ time.Duration, _ error) {}
+
+// recordingLogger 把所有 Logger.Warn/Error 调用按级别累计，供启动检测、anomaly 路径测试断言。
+type recordingLogger struct {
+	mu     sync.Mutex
+	Debugs []string
+	Infos  []string
+	Warns  []string
+	Errors []string
+}
+
+func (l *recordingLogger) Debug(_ context.Context, msg string, _ ...Field) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.Debugs = append(l.Debugs, msg)
+}
+func (l *recordingLogger) Info(_ context.Context, msg string, _ ...Field) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.Infos = append(l.Infos, msg)
+}
+func (l *recordingLogger) Warn(_ context.Context, msg string, _ ...Field) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.Warns = append(l.Warns, msg)
+}
+func (l *recordingLogger) Error(_ context.Context, msg string, _ ...Field) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.Errors = append(l.Errors, msg)
+}
+
+func (l *recordingLogger) warnContains(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, m := range l.Warns {
+		if strings.Contains(m, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// countByKind 返回某种事件类型的发生次数。
+func (o *fakeObserver) countByKind(kind EventKind) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n := 0
+	for _, e := range o.Events {
+		if e.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// firstByKind 返回第一个匹配 kind 的事件（用于断言 attrs）；找不到返回零值 + false。
+func (o *fakeObserver) firstByKind(kind EventKind) (observedEvent, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, e := range o.Events {
+		if e.Kind == kind {
+			return e, true
+		}
+	}
+	return observedEvent{}, false
+}
+
 type testEnv struct {
 	t      testing.TB
 	engine *Engine[*testOrder]
 
-	store  *fakeStore
-	gw     *fakeGateway
-	dq     *fakeDelayQueue
-	cache  *fakeCache
-	stream *fakeStream
+	store    *fakeStore
+	gw       *fakeGateway
+	dq       *fakeDelayQueue
+	cache    *fakeCache
+	stream   *fakeStream
+	observer *fakeObserver
 
-	mu                sync.Mutex
-	OnCreatedCalls    []string
-	OnPaidCalls       []onPaidCall
-	OnDeliveredCalls  []string
-	OnClosedCalls     []onClosedCall
-	OnCancelledCalls  []onCancelledCall
-	OnReopenedCalls   []string
-	OnSupersededCalls []onSupersededCall
-	OnAnomalyCalls    []onAnomalyCall
+	mu                             sync.Mutex
+	OnCreatedCalls                 []string
+	OnPaidCalls                    []onPaidCall
+	OnDeliveredCalls               []string
+	OnClosedCalls                  []onClosedCall
+	OnCancelledCalls               []onCancelledCall
+	OnReopenedCalls                []string
+	OnSupersededCalls              []onSupersededCall
+	OnSupersededGatewayFailedCalls []onSupersededGatewayFailedCall
+	OnAnomalyCalls                 []onAnomalyCall
 
 	// Hook behavior injection
 	OnPaidErr error
@@ -726,12 +829,13 @@ type testEnv struct {
 func newTestEnv(t testing.TB) *testEnv {
 	t.Helper()
 	env := &testEnv{
-		t:      t,
-		store:  newFakeStore(),
-		gw:     newFakeGateway(),
-		dq:     newFakeDelayQueue(),
-		cache:  newFakeCache(),
-		stream: newFakeStream(),
+		t:        t,
+		store:    newFakeStore(),
+		gw:       newFakeGateway(),
+		dq:       newFakeDelayQueue(),
+		cache:    newFakeCache(),
+		stream:   newFakeStream(),
+		observer: &fakeObserver{},
 	}
 
 	cfg := Config[*testOrder]{
@@ -740,6 +844,7 @@ func newTestEnv(t testing.TB) *testEnv {
 		DelayQueue: env.dq,
 		Cache:      env.cache,
 		Stream:     env.stream,
+		Observer:   env.observer,
 		Logger:     nopLogger{},
 
 		OnCreated: func(_ context.Context, o *testOrder) error {
@@ -779,6 +884,14 @@ func newTestEnv(t testing.TB) *testEnv {
 		OnSuperseded: func(_ context.Context, o *testOrder, newProductID uint64) {
 			env.mu.Lock()
 			env.OnSupersededCalls = append(env.OnSupersededCalls, onSupersededCall{o.OrderNo(), newProductID})
+			env.mu.Unlock()
+		},
+		OnSupersededGatewayCloseFailed: func(_ context.Context, o *testOrder, newProductID uint64, gatewayErr error) {
+			env.mu.Lock()
+			env.OnSupersededGatewayFailedCalls = append(
+				env.OnSupersededGatewayFailedCalls,
+				onSupersededGatewayFailedCall{o.OrderNo(), newProductID, gatewayErr},
+			)
 			env.mu.Unlock()
 		},
 		OnAnomaly: func(_ context.Context, o *testOrder, kind AnomalyKind, detail string) {

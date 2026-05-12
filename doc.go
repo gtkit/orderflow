@@ -63,6 +63,9 @@
 //
 // # 生产部署清单
 //
+// **首次接入请先读 PRODUCTION_CHECKLIST.md**——按 5 大类列出所有硬门禁项（安全 / 幂等 /
+// 基础设施 / 配置 / 监控告警）。本节内容是 checklist 的子集，作为 GoDoc 入口的提醒。
+//
 //   - Redis 集群部署：rediszq driver 的 key 必须用 hash tag（见 drivers/rediszq/doc.go）。
 //   - 推荐配置：注入 Locker（避免并发 Create 多 Pending）+ Observer（监控指标）+
 //     IdempotentOnPaidViaRedis（OnPaid 幂等保护）+ CloseSupersededPolicy=SupersededDegraded
@@ -76,6 +79,17 @@
 //     SupersededDegraded 路径下的网关失败等）。
 //   - drivers 的 go.mod replace 指令仅用于本地开发，发版前必须删除并 require 真实 tag
 //     （仓库提供 scripts/check-release.sh 做 CI 校验）。
+//   - Observer 仅用于运维埋点（Prometheus / OpenTelemetry / 审计），**不要**接到
+//     业务事件总线。业务侧消费状态跃迁请使用 hook（OnCreated / OnPaid 等），细节
+//     见 observer.go "与 Hook 的语义边界"。
+//   - Fallback scanner 是异步通知失败 / 履约失败 / 关单失败的最终兜底——若它停摆，
+//     多条 anomaly 链路（MalformedPaidNotify / DeliveryFailed / DelayQueue 漏投 /
+//     SupersededDegraded 网关失败等）都会无人收尾。**生产必须**：
+//     (a) `worker.StartAll` 必须随服务启动；
+//     (b) Observer / Prometheus 监控 `CloseFallback` 与 `DeliveryFallback` 的扫描耗时与处理量，
+//     配置"超过 N 分钟无扫描" 与 "单次扫描超时" 双重告警；
+//     (c) 给业务上"订单 Paid 但未 Delivered 超过 X 分钟"的兜底告警，独立于 worker 内部
+//     指标，作为最后一道防线。
 //
 // # 调用方鉴权责任（业务方必读）
 //

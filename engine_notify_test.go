@@ -490,6 +490,72 @@ func TestHandleNotify_RejectsOversizedFields(t *testing.T) {
 	}
 }
 
+// MalformedPaidNotify：Paid 状态网关回调缺关键字段，应在 GetByNo 之前拦截，
+// 仅 Observer 收到 anomaly 事件，不触发 OnAnomaly 钩子，不推进状态。
+func TestHandleNotify_RejectsMalformedPaidNotify_EmptyTradeNo(t *testing.T) {
+	env := newTestEnv(t)
+	seedPendingOrder(env, "NO-MALFORMED-1") // 落库，但 GetByNo 不应被调用
+
+	env.gw.NotifyResult = NotifyResult{
+		OutTradeNo:    "NO-MALFORMED-1",
+		TransactionID: "", // 关键：空 trade no
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+		PaidAt:        time.Now(),
+		Channel:       "wechat",
+	}
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	// 必须在 GetByNo 之前拦截
+	mustEqual(t, env.store.GetByNoCalls, 0, "GetByNo not called")
+	mustEqual(t, env.store.CASConfirmPaidCalls, 0, "no CAS")
+	mustLen(t, env.OnPaidCalls, 0, "no OnPaid")
+	mustLen(t, env.OnAnomalyCalls, 0, "OnAnomaly hook not triggered (no order context)")
+
+	// 但 Observer 必须收到 EventAnomaly + kind=malformed_paid_notify
+	mustEqual(t, env.observer.countByKind(EventAnomaly), 1, "exactly one anomaly event")
+	ev, ok := env.observer.firstByKind(EventAnomaly)
+	if !ok {
+		t.Fatal("anomaly event not found in observer")
+	}
+	if got := ev.Attrs["kind"]; got != string(AnomalyMalformedPaidNotify) {
+		t.Fatalf("anomaly kind = %v, want %s", got, AnomalyMalformedPaidNotify)
+	}
+
+	// 订单仍 Pending（未受影响）
+	mustEqual(t, env.store.byNo["NO-MALFORMED-1"].status, StatusPending, "order remains Pending")
+}
+
+func TestHandleNotify_RejectsMalformedPaidNotify_NonPositiveAmount(t *testing.T) {
+	env := newTestEnv(t)
+	seedPendingOrder(env, "NO-MALFORMED-2")
+
+	env.gw.NotifyResult = NotifyResult{
+		OutTradeNo:    "NO-MALFORMED-2",
+		TransactionID: "TXN-OK",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   0, // 关键：非正金额
+		PaidAt:        time.Now(),
+		Channel:       "wechat",
+	}
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	mustEqual(t, env.store.GetByNoCalls, 0, "GetByNo not called")
+	mustEqual(t, env.store.CASConfirmPaidCalls, 0, "no CAS")
+	mustLen(t, env.OnPaidCalls, 0, "no OnPaid")
+	mustLen(t, env.OnAnomalyCalls, 0, "OnAnomaly hook not triggered")
+	mustEqual(t, env.observer.countByKind(EventAnomaly), 1, "exactly one anomaly event")
+
+	ev, _ := env.observer.firstByKind(EventAnomaly)
+	if got := ev.Attrs["kind"]; got != string(AnomalyMalformedPaidNotify) {
+		t.Fatalf("anomaly kind = %v, want %s", got, AnomalyMalformedPaidNotify)
+	}
+
+	mustEqual(t, env.store.byNo["NO-MALFORMED-2"].status, StatusPending, "order remains Pending")
+}
+
 func TestHandleNotify_OnPaidFailureKeepsOrderInPaid(t *testing.T) {
 	env := newTestEnv(t)
 	seedPendingOrder(env, "NO-FAIL")

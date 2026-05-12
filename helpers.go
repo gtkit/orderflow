@@ -109,6 +109,24 @@ func (e *Engine[O]) publishStatus(ctx context.Context, orderToken string, userID
 	}
 }
 
+// cleanupDelayQueueAfterTerminal 在订单转入终态（Closed / Cancelled / Delivered）后
+// 清理延时关单队列残留。
+//
+// 调用约定：
+//   - **必须**在本地 CAS 成功之后、Observer.Event / appendLog / hook 触发之前调用，
+//     保持四条终态路径（HandleNotify Paid / closeSuperseded / CancelByUser / CloseByAdmin）
+//     顺序对称。
+//   - Remove 失败**不**阻断主流程——CloseWorker 拿到残留任务时对非 Pending 订单走幂等
+//     skip，正确性不受影响；但通过 recordAnomaly 上报让监控能感知 queue 可用性。
+//   - **不要**从 Engine.Close 主路径调用——那里 CloseWorker 通过 Ack 处理队列清理。
+//   - **不要**从 rollbackPendingOnEnqueueFail 调用——Enqueue 本身失败时队列里压根没有该订单。
+func (e *Engine[O]) cleanupDelayQueueAfterTerminal(ctx context.Context, order O) {
+	if err := e.delayQueue.Remove(ctx, order.OrderNo()); err != nil {
+		e.recordAnomaly(ctx, order, AnomalyDelayQueueCleanupFailed,
+			"remove delay close failed: "+err.Error())
+	}
+}
+
 // appendLog 写一条订单状态流水。失败降级为警告日志 + Observer 异常事件，不阻断主流程。
 //
 // 发 EventAnomaly 的目的：审计/合规场景下流水丢失是严重事件——DBA 误删 log 表、
@@ -125,14 +143,15 @@ func (e *Engine[O]) appendLog(ctx context.Context, order O, from, to OrderStatus
 		CreatedAt:  time.Now(),
 	}
 	if err := e.store.AppendLog(ctx, entry); err != nil {
-		e.logger.Warn(ctx, "orderflow: append order log failed",
+		e.logger.Error(ctx, "orderflow: ALERT append order log failed",
 			String("order_no", order.OrderNo()),
+			String("kind", string(AnomalyAppendLogFailed)),
 			String("from", from.String()),
 			String("to", to.String()),
 			Err(err),
 		)
 		e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
-			"kind":   "append_log_failed",
+			"kind":   string(AnomalyAppendLogFailed),
 			"from":   from.String(),
 			"to":     to.String(),
 			"actor":  actor,

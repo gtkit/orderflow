@@ -361,3 +361,125 @@ func TestCreate_SupersedeDegraded_GatewayCloseFailureContinues(t *testing.T) {
 	mustLen(t, env.OnClosedCalls, 1, "OnClosed fired")
 	mustEqual(t, env.OnClosedCalls[0].Reason, ClosedReasonSuperseded, "OnClosed reason")
 }
+
+// P1#3: Degraded + 网关失败 + CAS 成功 → 必须 emit EventSupersededGatewayCloseFailed 并触发 hook。
+func TestCreate_SupersededGatewayFailedTriggersHookOnDegraded(t *testing.T) {
+	env := newTestEnv(t)
+	env.engine.closeSupersededPolicy = SupersededDegraded
+	ctx := context.Background()
+
+	req := standardRequest()
+	req.PayMethod = PayMethodAlipay
+	old := seedSupersedeOldOrder(t, env, req)
+
+	gwErr := errors.New("gateway 5xx persistent")
+	env.gw.CloseOrderErr = gwErr
+
+	_, err := env.engine.Create(ctx, req)
+	mustNotErr(t, err, "Create should succeed in Degraded mode")
+	mustEqual(t, old.status, StatusClosed, "old order locally Closed")
+
+	// Observer 必须收到 EventSupersededGatewayCloseFailed
+	mustEqual(t, env.observer.countByKind(EventSupersededGatewayCloseFailed), 1,
+		"EventSupersededGatewayCloseFailed emitted exactly once")
+	ev, _ := env.observer.firstByKind(EventSupersededGatewayCloseFailed)
+	if got := ev.Attrs["kind"]; got != string(AnomalySupersededGatewayCloseFailed) {
+		t.Fatalf("anomaly kind = %v, want %s", got, AnomalySupersededGatewayCloseFailed)
+	}
+	if got := ev.Attrs["reason"].(string); got == "" {
+		t.Fatal("reason attribute missing")
+	}
+
+	// hook 必须被调用，且参数完整
+	mustLen(t, env.OnSupersededGatewayFailedCalls, 1, "hook fired once")
+	call := env.OnSupersededGatewayFailedCalls[0]
+	mustEqual(t, call.OldOrderNo, old.orderNo, "hook receives old order no")
+	mustEqual(t, call.NewProductID, req.Product.ID, "hook receives new product id")
+	if !errors.Is(call.GatewayErr, gwErr) && !errContains(call.GatewayErr, "gateway 5xx") {
+		t.Fatalf("hook gatewayErr = %v, want wrap of %v", call.GatewayErr, gwErr)
+	}
+}
+
+// P1#3: Strict 模式不触发 hook（早期 return，没机会执行到 hook 代码）。
+func TestCreate_SupersededGatewayFailedNotTriggeredOnStrict(t *testing.T) {
+	env := newTestEnv(t)
+	// 默认 SupersededStrict，不显式设置
+	ctx := context.Background()
+
+	req := standardRequest()
+	req.PayMethod = PayMethodAlipay
+	seedSupersedeOldOrder(t, env, req)
+
+	env.gw.CloseOrderErr = errors.New("gateway 5xx")
+
+	_, err := env.engine.Create(ctx, req)
+	if err == nil {
+		t.Fatal("expected Strict error")
+	}
+
+	// Strict 模式下 hook 与 Event 都不应该触发
+	mustEqual(t, env.observer.countByKind(EventSupersededGatewayCloseFailed), 0,
+		"no event in Strict mode")
+	mustLen(t, env.OnSupersededGatewayFailedCalls, 0, "no hook in Strict mode")
+}
+
+// P1#3: Degraded + 网关失败 + CAS race（旧单已被并发推到 Paid）→ 不触发 hook。
+// 设计意图：hook 语义是"订单确实被本次操作推到 Closed"，CAS 抢跑失败时订单
+// 已是 Paid，hook 失去意义。
+func TestCreate_SupersededGatewayFailedNotTriggeredOnCASRaceLost(t *testing.T) {
+	env := newTestEnv(t)
+	env.engine.closeSupersededPolicy = SupersededDegraded
+	ctx := context.Background()
+
+	req := standardRequest()
+	req.PayMethod = PayMethodAlipay
+	old := seedSupersedeOldOrder(t, env, req)
+
+	// 网关失败 + 模拟 CAS race：CASClose 第一次返回 affected=0 且把旧单改成 Paid
+	env.gw.CloseOrderErr = errors.New("gateway 5xx")
+	env.store.CASCloseLosesToPaidOnce = true
+
+	result, err := env.engine.Create(ctx, req)
+	mustNotErr(t, err, "Create should succeed (return current Paid order)")
+	if result == nil || !result.Reused {
+		t.Fatal("expected Reused=true with the Paid order")
+	}
+	mustEqual(t, old.status, StatusPaid, "old order won race -> Paid")
+
+	// hook 与 Event 都不应该触发（CAS 没成功推 Closed）
+	mustEqual(t, env.observer.countByKind(EventSupersededGatewayCloseFailed), 0,
+		"no event when CAS lost race")
+	mustLen(t, env.OnSupersededGatewayFailedCalls, 0, "no hook when CAS lost race")
+}
+
+// delay-queue-cleanup-consistency：closeSuperseded 路径下 delayQueue.Remove 失败
+// 必须 emit AnomalyDelayQueueCleanupFailed（之前是 `_ = Remove(...)` 静默吞错）。
+func TestCreate_SupersededDelayQueueRemoveFailureEmitsAnomaly(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	req := standardRequest()
+	req.PayMethod = PayMethodAlipay
+	seedSupersedeOldOrder(t, env, req)
+
+	// 注入 delay queue Remove 失败
+	env.dq.ErrOnRemove = errors.New("redis cluster unreachable")
+
+	result, err := env.engine.Create(ctx, req)
+	mustNotErr(t, err, "Create should succeed despite queue Remove failure")
+	if result == nil || result.Order == nil {
+		t.Fatal("expected new order")
+	}
+
+	// 必须 emit AnomalyDelayQueueCleanupFailed（通过 OnAnomaly hook 验证最易断言）
+	found := false
+	for _, c := range env.OnAnomalyCalls {
+		if c.Kind == AnomalyDelayQueueCleanupFailed {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected AnomalyDelayQueueCleanupFailed in OnAnomalyCalls, got %v", env.OnAnomalyCalls)
+	}
+}

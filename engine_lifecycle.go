@@ -251,6 +251,10 @@ func (e *Engine[O]) rollbackPendingOnEnqueueFail(ctx context.Context, order O, e
 //     网关侧的旧订单清理由 CloseFallback 周期扫描兜底。
 func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductID uint64) (current O, hasCurrent bool, err error) {
 	var zero O
+	// degradedGatewayErr 仅在"Degraded 模式且 afterClose 返回 err"时为非 nil，
+	// 用于在 CAS 成功推到 Closed 后触发 OnSupersededGatewayCloseFailed hook。
+	// Strict 模式分支早 return 时本变量保持零值，无副作用。
+	var degradedGatewayErr error
 	if afterErr := e.afterClose(ctx, existing); afterErr != nil {
 		e.appendLog(ctx, existing, StatusPending, StatusPending, "system",
 			"gateway close failed during replacement: "+afterErr.Error())
@@ -263,6 +267,7 @@ func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductI
 			String("order_no", existing.OrderNo()),
 			Any("error", afterErr),
 		)
+		degradedGatewayErr = afterErr
 	}
 
 	affected, casErr := e.store.CASClose(ctx, existing.OrderNo())
@@ -288,7 +293,7 @@ func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductI
 		return refreshed, true, nil
 	}
 
-	_ = e.delayQueue.Remove(ctx, existing.OrderNo())
+	e.cleanupDelayQueueAfterTerminal(ctx, existing)
 	e.publishStatus(ctx, existing.OrderToken(), existing.UserID(), StatusClosed, existing.ExpireAt())
 	e.appendLog(ctx, existing, StatusPending, StatusClosed, "system",
 		fmt.Sprintf("superseded by new product %d", newProductID))
@@ -309,6 +314,24 @@ func (e *Engine[O]) closeSuperseded(ctx context.Context, existing O, newProductI
 			e.onClosed(ctx, existing, ClosedReasonSuperseded)
 		})
 	}
+
+	// SupersededDegraded 模式下 afterClose 失败但本地已成功 CAS 推到 Closed：
+	// 发出专用 Observer 事件 + 调用业务方注入的 hook，便于自定义补救（retry queue / 告警 / 审计）。
+	// **严格三条件**（在此处天然满足）：Degraded 模式（早期分支保证）+ afterErr != nil
+	// （degradedGatewayErr != nil）+ CAS affected > 0（已通过上方 affected==0 分支返回）。
+	if degradedGatewayErr != nil {
+		e.observer.Event(ctx, EventSupersededGatewayCloseFailed, existing.OrderNo(), map[string]any{
+			"kind":           string(AnomalySupersededGatewayCloseFailed),
+			"new_product_id": newProductID,
+			"reason":         degradedGatewayErr.Error(),
+		})
+		if e.onSupersededGatewayCloseFailed != nil {
+			e.safeHook(ctx, "OnSupersededGatewayCloseFailed", existing.OrderNo(), func() {
+				e.onSupersededGatewayCloseFailed(ctx, existing, newProductID, degradedGatewayErr)
+			})
+		}
+	}
+
 	return zero, false, nil
 }
 

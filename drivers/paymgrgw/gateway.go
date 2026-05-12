@@ -51,6 +51,26 @@ func (g *Gateway) Validate() error {
 }
 
 // UnifiedOrder 下单并返回客户端拉起支付所需参数。
+//
+// # 幂等契约满足度（当前实现状态）
+//
+// 核心包 orderflow.PaymentGateway.UnifiedOrder 要求实现方以 OutTradeNo 为幂等键，
+// 把"订单已存在且未支付"识别为成功响应。本 driver **当前依赖上游 paymgr / go-pay
+// 透传到底层网关的天然幂等性**：
+//
+//   - 微信 V3 transactions/jsapi：相同 out_trade_no + 相同金额返回原 prepay_id
+//     等价的成功响应（go-pay 默认透传成功）。
+//   - 支付宝 OpenAPI：相同 out_trade_no + 相同金额返回原 trade_no（go-pay 透传成功）。
+//
+// 这两条主流路径下，本 driver 直接透传 paymgr.UnifiedOrder 错误是合规的——
+// 上游不会把"订单已存在且未支付"作为错误返回。
+//
+// **未来风险点**：若接入新渠道（jdpay / unipay / 自研沙箱等）返回独有的"订单已存在"
+// 错误码，需要在此函数内补 errors.As(&paymgr.ChannelError{}) + code 翻译逻辑，
+// 把它转成 QueryOrder 拉取的等价 UnifiedOrderResponse 返回。
+//
+// paymgr.ErrOrderPaid / paymgr.ErrOrderClosed 这两种 sentinel 错误**不在**翻译范围内：
+// 它们意味着订单已经走到不可重试的终态，Engine 应让错误浮上去由调用方处理。
 func (g *Gateway) UnifiedOrder(ctx context.Context, ch orderflow.Channel, req orderflow.UnifiedOrderRequest) (orderflow.UnifiedOrderResponse, error) {
 	if err := g.Validate(); err != nil {
 		return orderflow.UnifiedOrderResponse{}, err

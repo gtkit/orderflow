@@ -5,12 +5,44 @@
 ## [Unreleased]
 
 ### Added
-- 新增 `AnomalyMalformedPaidNotify` 异常类型，标识 Paid 状态网关回调缺失关键字段（`TransactionID` 为空或 `TotalAmount<=0`）的场景。`HandleNotify` 检测到后会拒绝该回调并返回 nil，让 fallback scanner 通过 `QueryOrder` 走对账兜底，避免污染 Bill 表 `trade_no` 列。
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [1.11.0] - 2026-05-12
+
+> 状态机收口与可观测性强化版本。本次 6 个 OpenSpec change 系统性补齐了异步通知校验、取消/管理员关单的竞态可观测性、网关接口契约、Observer 与 hook 语义边界、OnPaid 幂等启动检测、延时队列清理一致性等多个生产可靠性维度，并新增 `PRODUCTION_CHECKLIST.md` 作为接入方首次部署的硬门禁清单。**全部为 additive Minor 升级**——零默认行为变化、零接口签名变化、零向后兼容破坏。根模块与所有 driver 子模块同步使用 `v1.11.0` 版本号发布（沿用 v1.10.0 的统一版本号约定），driver 自身无源码变更，仅 `require github.com/gtkit/orderflow` 升级到 v1.11.0 保持依赖对齐。
+
+### Added
+- 新增 `AnomalyMalformedPaidNotify` 异常类型，标识 Paid 状态网关回调缺失关键字段（`TransactionID` 为空或 `TotalAmount<=0`）的场景。`HandleNotify` 检测到后会拒绝该回调并返回 nil，订单仍为 Pending，CloseFallback 超时后会将其关闭；网关后续若发出合法 Paid 通知会触发 `handleClosedPaidNotify` 经 `QueryOrder` 验证并 `CASReopenPaid` 恢复（核心包不在此触发点主动查网关）。仅 Observer 发 `EventAnomaly`，不触发 `OnAnomaly` 钩子（order 尚未加载）。
+- 新增 `engine_notify_test.go` 两个用例覆盖 MalformedPaidNotify：空 `TransactionID` 与 `TotalAmount<=0`，断言不调用 `Store.GetByNo` / `CASConfirmPaid`、Observer 收到 `EventAnomaly` + `kind=malformed_paid_notify`、`OnAnomaly` 钩子不触发；订单状态保持 Pending。同时为 `fakeStore` 增加 `GetByNoCalls` 计数、引入 `fakeObserver` 供测试断言 Observer 事件。
+- 新增 `AnomalyAppendLogFailed` 异常类型——`Store.AppendLog` 失败时 Engine 通过 Observer 发 `EventAnomaly` + `kind=append_log_failed`，让审计/合规链路的写入空洞可被监控告警感知；主流程仍正常推进。
+- 新增 `Config[O].SkipOnPaidIdempotencyWarn` 字段——`Engine.New` 默认在配置 OnPaid 但未声明已实现幂等保护时输出 Warn 告警，提示双发风险并推荐 `IdempotentOnPaidViaRedis`；业务方在已自行幂等后可设 true 关闭告警。同时新增 3 个测试覆盖 Warn / opt-out / 未配 OnPaid 三种路径。
+- 新增 `TestHealthy_ProbesPaymentGatewayWhenImplemented` 测试：覆盖 PaymentGateway 实现 Healther 时被 `Engine.Healthy` 探测、未实现时跳过两种路径。
+- 新增退款编排用的统一事件 / 异常常量（核心包不主动 emit，仅供业务方调 Observer 时使用）：`EventRefundInitiated` / `EventRefundSucceeded` / `EventRefundFailed` / `EventRefundUnknown`、`AnomalyRefundGatewayFailed` / `AnomalyRefundDrift`。新建 `refund_observability.md` 给出推荐 emit 时机 + attribute schema；`examples/refund_quickstart/main.go` 已用上新常量做参考。
+- 新增 `OnSupersededGatewayCloseFailedHook` + `EventSupersededGatewayCloseFailed` + `AnomalySupersededGatewayCloseFailed`：`SupersededDegraded` 模式下网关 CloseOrder 失败但本地 CAS Close 成功时触发，业务方可在 hook 内推到自定义重试队列 / 告警渠道补救可能的"用户用旧 prepay_id 继续支付"窗口。严格三条件触发（Degraded + afterClose err + CAS affected>0），含 3 个测试覆盖 Triggers / Strict 不触发 / CAS race 不触发。
 
 ### Changed
 - 补充 README 目录结构中文注释，覆盖核心文件、worker、drivers、examples、脚本与本地工作流配置，并同步 `CancelByUser` 流程图与钩子表说明。
 - 更新包级 GoDoc 的用户取消钩子与鉴权边界说明，使 `doc.go` 与当前公开 API 保持一致。
 - `CancelByUser` 与 `CloseByAdmin` 在 `CASCancel` / `CASClose` 返回 `affected=0` 时复查订单当前状态并追加流水（与 `Close` 行为对齐），便于排查"支付回调抢跑"等竞态。仅新增日志，主流程返回值不变。
+- 明确 `PaymentGateway.UnifiedOrder` 接口幂等契约：实现方必须以 `OutTradeNo` 为幂等键，将"订单已存在且未支付"视为成功响应。避免用户复用 Pending 二次下单时 driver 把"订单已存在"错误码抛出导致付不了款。仅文档化既有约定，不改接口签名。
+- 在 `Observer` 接口 GoDoc 与 `doc.go` 生产部署清单中明确 Observer 是**运维埋点**（metrics / tracing / audit）而非业务事件总线，避免下游错把 Observer 接到业务事件流。README 同步补充提示。
+- `drivers/paymgrgw` 的 `UnifiedOrder` 加 GoDoc：明确当前依赖微信/支付宝上游 OutTradeNo 天然幂等满足核心契约；若未来接入返回独有"订单已存在"错误码的新渠道，需在此处补 `errors.As(&paymgr.ChannelError{})` 翻译为成功响应。
+- `Engine.Close` 对非 Pending 订单的 skip 日志从 Debug 升级为 Info，便于运维不开 Debug 也能排查"为什么 Close 没生效"。
+- `Engine.Healthy` 把 `PaymentGateway` 加入探测列表，沿用 Healther opt-in 模式（driver 未实现时自动跳过，与历史行为兼容）。`RefundGateway` 因 Engine 不持有引用不主动探测——典型 driver（如 paymgrgw）同实例实现两个接口时 PaymentGateway 探测已隐式覆盖。
+- `Subscription` 接口 GoDoc 补充明确"核心包不保证 at-least-once"，客户端应配合 PollStatus 兜底；`StatusCache.Set` 接口 GoDoc 明确实现方对负 TTL 的 clamp 约束。
+- `retryFinalizeForPaid` 函数 GoDoc 明确 TradeNo mismatch / amount mismatch 时阻断 finalize 的设计意图，便于审查者一眼看懂守卫语义。
+- `helpers.go` 的 `appendLog` 把失败日志级别从 Warn 升级为 Error 并附 `kind` 字段，让 `orderflow: ALERT` 告警关键字一致命中。
+- 统一终态路径对延时队列的清理行为：抽取 `cleanupDelayQueueAfterTerminal` helper，4 处 caller（HandleNotify Paid 路径 / closeSuperseded / CancelByUser / CloseByAdmin）现在调用同一 helper。变化：(1) closeSuperseded 路径下 Remove 失败从静默吞错升级为 `AnomalyDelayQueueCleanupFailed` 上报；(2) CancelByUser / CloseByAdmin 新增 Remove 调用，避免 CloseWorker 后续对 Cancelled / Closed 订单做幂等 skip 浪费资源。CAS 抢跑失败路径仍**不**调 Remove（订单已不在本路径责任范围）。含 4 个新测试覆盖 Cancel/Admin Remove 调用 + Cancel Remove 失败 anomaly + closeSuperseded Remove 失败 anomaly。
+- 新增 `PRODUCTION_CHECKLIST.md` —— 接入方首次部署前的硬门禁清单，覆盖 5 大类（安全 / 业务幂等 / 基础设施 / 配置选择 / 监控告警规则），整合了 `doc.go` 生产清单、`README.md` 部署章节、`refund_observability.md` 退款约定等原本散落的部署指南。README 顶部和 `doc.go` 生产清单顶部已加 cross-reference 指向本文件。
 
 ### Deprecated
 
@@ -18,6 +50,10 @@
 
 ### Fixed
 - 修正 `doc.go` 兜底唯一索引示例的 status 取值：`status=1` → `status=0`。`StatusPending` 实际值为 `0`（见 `status.go`），原示例建出的部分唯一索引永远不会匹配 Pending 行，"一用户一商品一 Pending" 的 DB 兜底形同虚设。README 的 PostgreSQL 示例与此一并对齐。
+- `doc.go` 生产部署清单加 fallback scanner 告警要求条目——CloseFallback / DeliveryFallback 是多条 anomaly 链路的最终兜底，停摆即失去防线，必须独立配告警。
+- 修正 `AnomalyMalformedPaidNotify` 的恢复路径描述：早期文档误称"通过 QueryOrder 兜底恢复"，实际触发点核心包不会主动查网关；订单仍 Pending，由 `CloseFallback` 超时关闭，再依赖后续合法 notify 经 `handleClosedPaidNotify` 恢复。`events.go` GoDoc / README / 早期 CHANGELOG 条目同步更正。
+- 修正 `engine_close.go` 的 `CloseByUser` GoDoc：原文表述"适用于'我的订单 → 取消'"会让下游误以为可用于取消未过期订单；实际语义是"用户关闭已过期 Pending 订单"。取消未过期订单请用 `CancelByUser`，文档现已显式区分三种关单 API（CloseByUser / CancelByUser / CloseByAdmin）。
+- 修正 `hooks.go` 顶部总述：原文笼统说"返回 error 的钩子失败会阻断主流程"，实际只有 `OnPaid` 阻断 finalize；`OnCreated` 与 `OnDelivered` 返回 error 仅 `logger.Warn` 不阻断。GoDoc 现按钩子类型逐一说明 error 语义。
 
 ### Security
 

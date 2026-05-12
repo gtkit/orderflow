@@ -52,7 +52,12 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 
 	// Paid 回调语义校验：合法渠道的 Paid 通知必带非空 TransactionID 与 TotalAmount > 0。
 	// 这里在 GetByNo 前拦截：避免恶意或畸形请求穿透到 DB / Bill 链路，污染 trade_no 列、
-	// 破坏对账。被拒绝的合法订单可通过 fallback scanner 的 QueryOrder 兜底恢复。
+	// 破坏对账。
+	//
+	// 恢复路径（核心包不在此触发点主动查网关）：被拒绝时订单仍为 Pending →
+	// CloseFallback 超时关闭后等下次合法 Paid 通知，HandleNotify 走 StatusClosed 分支
+	// 经 handleClosedPaidNotify 的 QueryOrder 验证并 CASReopenPaid 恢复。详见
+	// AnomalyMalformedPaidNotify 常量 GoDoc（events.go）。
 	//
 	// 此处不调用 recordAnomaly：order 尚未查询，没有 O 上下文可传。直接走 logger +
 	// Observer.Event(EventAnomaly)；OnAnomaly 钩子在 order 未知时不触发（与 ALERT
@@ -130,12 +135,7 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 		"amount":   notify.TotalAmount,
 	})
 
-	if err := e.delayQueue.Remove(ctx, notify.OutTradeNo); err != nil {
-		// 残留订单号会被 CloseWorker 二次拉取，对 Paid 订单走幂等 skip 路径不影响正确性，
-		// 但会污染 close 路径的事件 / 日志计数；通过 anomaly 让监控感知 Queue 可用性。
-		e.recordAnomaly(ctx, order, AnomalyDelayQueueCleanupFailed,
-			"remove delay close failed: "+err.Error())
-	}
+	e.cleanupDelayQueueAfterTerminal(ctx, order)
 	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusPaid, order.ExpireAt())
 
 	// CAS 已经把 trade_no / paid_at 写进去；finalize 需要最新快照。
@@ -152,6 +152,21 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 
 // retryFinalizeForPaid 处理"订单已是 Paid 状态时的重复通知"。
 // 通常是支付网关重试推送、或 OnPaid 首次失败后我们主动让网关重发。
+//
+// # 守卫策略（任一不通过即阻断 finalize 并返回 nil）
+//
+// 进入 finalize 之前**必须**通过以下两道校验，否则只 recordAnomaly + 返回 nil：
+//
+//  1. 金额一致：notify.TotalAmount == order.PayAmount()——否则 AnomalyAmountMismatch；
+//  2. 交易号一致：order.TradeNo() 已存在且 != notify.TransactionID 时拒绝——
+//     AnomalyTradeNoMismatch。这种情况意味着同一 OutTradeNo 收到了不同 TransactionID
+//     的回调（典型场景：网关侧重新生成了交易号，但本地已锁定第一个），继续 finalize
+//     会让 Bill 表记录两套 trade_no、对账系统抓狂。
+//
+// 守卫触发后**仅记 anomaly，不调用 finalizeDelivery**——主流程不向网关报错（return nil），
+// 由 OnAnomaly 钩子告警让人工介入。order.TradeNo() == "" 是合法情况（首次 Paid 回调后
+// CASConfirmPaid 已写入，但 retryFinalizeForPaid 也可能从 recheckAfterCASFailed 进入，
+// 那时 trade_no 字段尚未更新——此时跳过本守卫以允许首次 finalize 走通）。
 func (e *Engine[O]) retryFinalizeForPaid(ctx context.Context, order O, notify NotifyResult) error {
 	if notify.TotalAmount != order.PayAmount() {
 		e.recordAnomaly(ctx, order, AnomalyAmountMismatch,

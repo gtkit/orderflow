@@ -18,9 +18,18 @@ type Healther interface {
 
 // Healthy 探测所有可达的能力依赖，用于 K8s readiness probe / 启动自检。
 //
-// 检查路径：Store / Cache / Stream / DelayQueue / Locker（如配置）逐个 Ping，
-// 任一失败即返回错误（带依赖名称前缀）。Gateway 默认不探测——网关的"健康"语义
-// 多变（白名单 IP、签名密钥、商户号），由业务方在网关 driver 内自行实现。
+// 检查路径：Store / Cache / Stream / DelayQueue / Locker / **PaymentGateway**
+// （如配置且实现 Healther）逐个 Ping，任一失败即返回错误（带依赖名称前缀）。
+//
+// **关于 PaymentGateway**：driver 可选实现 Healther——网关的"健康"语义多变
+// （白名单 IP、签名密钥、商户号），driver 应自行选择轻量探测策略（如做一个无副作用的
+// QueryOrder("__healthprobe__") 并把 ErrOrderNotFound 视作健康）。drivers/paymgrgw
+// 未实现 Healther 时本探测自动跳过——保留与历史行为兼容（Gateway 不可达不影响 readiness）。
+//
+// **关于 RefundGateway**：核心 Engine 不持有 RefundGateway 引用（退款流程由业务方
+// 自行编排，详见 refund_gateway.go），因此 Healthy 不主动探测。业务方在退款服务的
+// readiness 探测里应单独验证 RefundGateway——如果 driver 同时实现 PaymentGateway 与
+// RefundGateway（典型如 *paymgrgw.Gateway），探测 PaymentGateway 等于隐式覆盖 RefundGateway。
 //
 // 不实现 Healther 接口的依赖会被跳过（视为"健康"）；建议生产 driver 都实现。
 //
@@ -42,6 +51,7 @@ func (e *Engine[O]) Healthy(ctx context.Context) error {
 		{"Stream", e.stream},
 		{"DelayQueue", e.delayQueue},
 		{"Locker", e.locker},
+		{"PaymentGateway", e.gateway},
 	}
 	var errs []error
 	for _, d := range deps {

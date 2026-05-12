@@ -4,11 +4,26 @@ import "context"
 
 // 本文件声明 Config 里会用到的函数钩子类型。
 //
-// 约定：
-//   - 返回 error 的钩子失败会阻断主流程（Create / HandleNotify 将返回该错误）；
-//   - 不返回 error 的钩子为"旁路观察"类（记日志 / 发告警），失败不影响主流程。
+// 约定：error 返回值的处理策略**因钩子而异**，并非"返回 error 就阻断主流程"。
+//
+//   - OnPaidHook：返回 error **阻断 finalize**——订单停在 Paid，FinalizePaidOrder 不执行，
+//     由 DeliveryFallback 周期重试。这是核心包**唯一**会因钩子错误阻断主流程的位置。
+//   - OnCreatedHook：返回 error 仅 logger.Warn，**不阻断** Create 主流程。订单已落库 +
+//     入延时队列；钩子失败不会回滚订单，Engine 继续走 requestPayment。
+//   - OnDeliveredHook：返回 error 仅 logger.Warn，**不阻断**。Delivered 状态已落库，
+//     钩子失败只是旁路观察缺失，不影响订单生命周期。
+//   - OnClosedHook / OnCancelledHook / OnReopenedHook / OnSupersededHook：不返回 error，
+//     纯旁路观察。panic 会被 recover 吞掉（记 ALERT 日志）。
+//   - OnAnomalyHook：不返回 error，纯告警出口。
+//
+// 设计取舍：OnPaid 阻断是为了保证"业务侧发放的权益 vs DB 履约状态"语义对齐——
+// 业务侧发券失败时订单不能进入 Delivered。其他 hook 失败时订单状态已经稳定，没必要
+// 因为业务旁路问题让用户重试或让 Engine 报错。
 
 // OnCreatedHook 在订单创建并落库后触发。
+//
+// 返回 error 仅 logger.Warn，不阻断 Create 主流程。订单已落库 + 入延时队列，
+// 钩子失败时业务侧应该在自己的实现里告警 / 入消息队列重试，Engine 层不会回滚订单。
 type OnCreatedHook[O OrderSnapshot] func(ctx context.Context, order O) error
 
 // OnPaidHook 在订单被确认支付成功、进入履约阶段时触发。
@@ -66,6 +81,10 @@ type OnCreatedHook[O OrderSnapshot] func(ctx context.Context, order O) error
 type OnPaidHook[O OrderSnapshot] func(ctx context.Context, order O, notify NotifyResult) error
 
 // OnDeliveredHook 在订单履约完成、状态迁到 Delivered 后触发。
+//
+// 返回 error 仅 logger.Warn，**不阻断** finalize 主流程。Delivered 状态已落库，
+// 钩子失败只是旁路观察缺失（典型场景：发送"履约完成"消息推送失败），不影响订单
+// 生命周期。
 type OnDeliveredHook[O OrderSnapshot] func(ctx context.Context, order O) error
 
 // OnClosedHook 订单关闭后触发。reason 给出关闭原因。
@@ -105,6 +124,33 @@ type OnReopenedHook[O OrderSnapshot] func(ctx context.Context, order O, notify N
 
 // OnSupersededHook 旧 Pending 订单被同用户的新订单替代关闭时触发。
 type OnSupersededHook[O OrderSnapshot] func(ctx context.Context, old O, newProductID uint64)
+
+// OnSupersededGatewayCloseFailedHook 在 SupersededDegraded 模式下，本地 CAS Close 成功
+// 但网关 CloseOrder 全部重试仍失败时触发。
+//
+// # 触发条件（必须三条同时成立）
+//
+//  1. Config.CloseSupersededPolicy == SupersededDegraded
+//  2. afterClose（含 3 次重试 + IsIgnorableCloseError）返回 err != nil
+//  3. Store.CASClose 实际把旧单推到 StatusClosed（affected > 0）
+//
+// 缺少任一条都不会触发。例如 CAS race 失败（affected=0，订单被并发推到 Paid）时
+// 旧单已不再是 Closed，本 hook 不应再 fire。
+//
+// # 业务方典型用法
+//
+//   - 把 oldOrderNo 推到自定义重试队列（K8s Job / 业务消息队列）周期重调 gateway.CloseOrder；
+//   - Slack / 钉钉 / 飞书告警让人工感知"用户可能用旧 prepay_id 继续支付"的风险窗口；
+//   - 写入风控审计表，便于事后追溯。
+//
+// # 注意
+//
+// 本 hook 是**旁路观察**（返回 void 而非 error）——失败不会回滚本地 CAS Close，
+// 也不会阻塞新单创建。Engine 已经把旧单状态推到 Closed，hook 仅是给业务方一个
+// 自主补救的扩展点。panic 会被 safeHook recover，不会冲破 Engine。
+type OnSupersededGatewayCloseFailedHook[O OrderSnapshot] func(
+	ctx context.Context, old O, newProductID uint64, gatewayErr error,
+)
 
 // OnAnomalyHook 检测到业务异常时触发（金额不一致、状态机例外等）。
 type OnAnomalyHook[O OrderSnapshot] func(ctx context.Context, order O, kind AnomalyKind, detail string)

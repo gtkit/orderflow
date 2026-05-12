@@ -2,6 +2,7 @@ package orderflow
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -42,14 +43,15 @@ type Config[O OrderSnapshot] struct {
 
 	// ----- 业务钩子（可选） -----
 
-	OnCreated    OnCreatedHook[O]
-	OnPaid       OnPaidHook[O]
-	OnDelivered  OnDeliveredHook[O]
-	OnClosed     OnClosedHook[O]
-	OnCancelled  OnCancelledHook[O]
-	OnReopened   OnReopenedHook[O]
-	OnSuperseded OnSupersededHook[O]
-	OnAnomaly    OnAnomalyHook[O]
+	OnCreated                      OnCreatedHook[O]
+	OnPaid                         OnPaidHook[O]
+	OnDelivered                    OnDeliveredHook[O]
+	OnClosed                       OnClosedHook[O]
+	OnCancelled                    OnCancelledHook[O]
+	OnReopened                     OnReopenedHook[O]
+	OnSuperseded                   OnSupersededHook[O]
+	OnSupersededGatewayCloseFailed OnSupersededGatewayCloseFailedHook[O]
+	OnAnomaly                      OnAnomalyHook[O]
 
 	IsReusable         IsReusableFunc[O]
 	ResolveChannel     ResolveChannelFunc
@@ -88,6 +90,22 @@ type Config[O OrderSnapshot] struct {
 	// 零值 SupersededStrict 保持 v1.0.0 行为；推荐生产环境改为 SupersededDegraded。
 	// 详见 CloseSupersededPolicy 类型说明。
 	CloseSupersededPolicy CloseSupersededPolicy
+
+	// SkipOnPaidIdempotencyWarn 关闭 New() 对未配置 OnPaid 幂等保护的 Warn 告警。
+	//
+	// 默认（零值 false）行为：当业务方配置了 OnPaid 但没有显式表明已自行实现幂等
+	// 时，Engine.New 会通过 Logger.Warn 输出一条告警，提示双发风险并推荐
+	// drivers/rediscache.IdempotentOnPaidViaRedis。这是为防止业务方忘记包幂等
+	// 保护层导致生产事故（最常见的 orderflow 误用之一）。
+	//
+	// 业务方在以下情况可设 true 关闭告警：
+	//   - OnPaid 内部已用业务侧自有的幂等表 / 唯一约束去重；
+	//   - 业务侧明确接受多次触发 OnPaid（如纯通知类副作用）；
+	//   - 已用 IdempotentOnPaid / IdempotentOnPaidViaRedis 包装但 Engine 检测不到
+	//     （helper 函数返回值看起来仍是普通 OnPaidHook 类型）。
+	//
+	// **不要**为了"启动日志清爽"而盲目设 true——告警是为了让你的同事下次看到。
+	SkipOnPaidIdempotencyWarn bool
 }
 
 // Engine 是订单流程的核心编排器。
@@ -103,14 +121,15 @@ type Engine[O OrderSnapshot] struct {
 	stream     StatusStream
 
 	// 钩子
-	onCreated    OnCreatedHook[O]
-	onPaid       OnPaidHook[O]
-	onDelivered  OnDeliveredHook[O]
-	onClosed     OnClosedHook[O]
-	onCancelled  OnCancelledHook[O]
-	onReopened   OnReopenedHook[O]
-	onSuperseded OnSupersededHook[O]
-	onAnomaly    OnAnomalyHook[O]
+	onCreated                      OnCreatedHook[O]
+	onPaid                         OnPaidHook[O]
+	onDelivered                    OnDeliveredHook[O]
+	onClosed                       OnClosedHook[O]
+	onCancelled                    OnCancelledHook[O]
+	onReopened                     OnReopenedHook[O]
+	onSuperseded                   OnSupersededHook[O]
+	onSupersededGatewayCloseFailed OnSupersededGatewayCloseFailedHook[O]
+	onAnomaly                      OnAnomalyHook[O]
 
 	isReusable         IsReusableFunc[O]
 	resolveChannel     ResolveChannelFunc
@@ -156,32 +175,50 @@ func New[O OrderSnapshot](cfg Config[O]) (*Engine[O], error) {
 	}
 	observer = wrapObserver(observer, logger)
 
+	// OnPaid 幂等保护启动检测：核心包无法**确定性地**判断 OnPaid 是否被
+	// IdempotentOnPaid / IdempotentOnPaidViaRedis 类 helper 包装（包装后类型仍是
+	// 普通 OnPaidHook）。最稳妥的做法：默认警告业务方"双发风险存在"，提供 Config
+	// 字段让确实做了幂等的业务方关闭告警。
+	//
+	// 不警告的场景：OnPaid 未配置；或业务方设了 SkipOnPaidIdempotencyWarn=true。
+	if cfg.OnPaid != nil && !cfg.SkipOnPaidIdempotencyWarn {
+		logger.Warn(context.Background(),
+			"orderflow: OnPaid configured without explicit idempotency opt-out — "+
+				"OnPaid will be called once per Paid notify, including retries. "+
+				"Wrap with drivers/rediscache.IdempotentOnPaidViaRedis or implement "+
+				"business-side dedup (idempotency table / unique constraint) to avoid "+
+				"double-grant on gateway retries. Set Config.SkipOnPaidIdempotencyWarn=true "+
+				"to silence this warning after confirming guard is in place.",
+		)
+	}
+
 	return &Engine[O]{
-		store:                 cfg.Store,
-		gateway:               cfg.Gateway,
-		delayQueue:            cfg.DelayQueue,
-		cache:                 cfg.Cache,
-		stream:                cfg.Stream,
-		onCreated:             cfg.OnCreated,
-		onPaid:                cfg.OnPaid,
-		onDelivered:           cfg.OnDelivered,
-		onClosed:              cfg.OnClosed,
-		onCancelled:           cfg.OnCancelled,
-		onReopened:            cfg.OnReopened,
-		onSuperseded:          cfg.OnSuperseded,
-		onAnomaly:             cfg.OnAnomaly,
-		isReusable:            cfg.IsReusable,
-		resolveChannel:        cfg.ResolveChannel,
-		buildNotifyURL:        cfg.BuildNotifyURL,
-		generateOrderNo:       genOrderNo,
-		generateOrderToken:    genOrderToken,
-		orderExpire:           cmp.Or(cfg.OrderExpire, DefaultOrderExpire),
-		location:              resolveLocation(cfg.Timezone),
-		logger:                logger,
-		observer:              observer,
-		locker:                cfg.Locker, // 可为 nil
-		createLockTTL:         cmp.Or(cfg.CreateLockTTL, DefaultCreateLockTTL),
-		closeSupersededPolicy: cfg.CloseSupersededPolicy,
+		store:                          cfg.Store,
+		gateway:                        cfg.Gateway,
+		delayQueue:                     cfg.DelayQueue,
+		cache:                          cfg.Cache,
+		stream:                         cfg.Stream,
+		onCreated:                      cfg.OnCreated,
+		onPaid:                         cfg.OnPaid,
+		onDelivered:                    cfg.OnDelivered,
+		onClosed:                       cfg.OnClosed,
+		onCancelled:                    cfg.OnCancelled,
+		onReopened:                     cfg.OnReopened,
+		onSuperseded:                   cfg.OnSuperseded,
+		onSupersededGatewayCloseFailed: cfg.OnSupersededGatewayCloseFailed,
+		onAnomaly:                      cfg.OnAnomaly,
+		isReusable:                     cfg.IsReusable,
+		resolveChannel:                 cfg.ResolveChannel,
+		buildNotifyURL:                 cfg.BuildNotifyURL,
+		generateOrderNo:                genOrderNo,
+		generateOrderToken:             genOrderToken,
+		orderExpire:                    cmp.Or(cfg.OrderExpire, DefaultOrderExpire),
+		location:                       resolveLocation(cfg.Timezone),
+		logger:                         logger,
+		observer:                       observer,
+		locker:                         cfg.Locker, // 可为 nil
+		createLockTTL:                  cmp.Or(cfg.CreateLockTTL, DefaultCreateLockTTL),
+		closeSupersededPolicy:          cfg.CloseSupersededPolicy,
 	}, nil
 }
 
@@ -273,4 +310,3 @@ func resolveLocation(tz string) *time.Location {
 	}
 	return loc
 }
-

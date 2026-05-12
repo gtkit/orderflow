@@ -420,6 +420,71 @@ func TestCancelByUser_SkipsNonPending(t *testing.T) {
 	mustLen(t, env.OnCancelledCalls, 0, "no hook on paid")
 }
 
+// delay-queue-cleanup-consistency：CancelByUser 成功路径必须清理延时队列。
+// 高频取消场景下漏 Remove 会让 CloseWorker 拉到过期任务再幂等 skip，浪费资源 + 污染日志。
+func TestCancelByUser_RemovesFromDelayQueue(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:    "C-DQ",
+		orderToken: "T-CDQ",
+		userID:     1001,
+		status:     StatusPending,
+		payMethod:  PayMethodWechat,
+		expireAt:   time.Now().Add(time.Hour),
+	})
+	env.dq.enqueued["C-DQ"] = time.Now().Add(time.Hour)
+
+	mustNotErr(t, env.engine.CancelByUser(context.Background(), 1001, "C-DQ", ""), "CancelByUser")
+
+	mustEqual(t, env.dq.RemoveCalls, 1, "delay queue Remove called once")
+	if _, stillEnqueued := env.dq.enqueued["C-DQ"]; stillEnqueued {
+		t.Fatal("expected order removed from delay queue")
+	}
+}
+
+// CancelByUser 路径下 Remove 失败必须触发 anomaly（不阻断主流程）。
+func TestCancelByUser_DelayQueueRemoveFailureEmitsAnomaly(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:    "C-DQ-ERR",
+		orderToken: "T-CDQE",
+		userID:     1001,
+		status:     StatusPending,
+		payMethod:  PayMethodWechat,
+		expireAt:   time.Now().Add(time.Hour),
+	})
+	env.dq.ErrOnRemove = errors.New("redis down")
+
+	mustNotErr(t, env.engine.CancelByUser(context.Background(), 1001, "C-DQ-ERR", ""), "CancelByUser")
+
+	// 主流程仍然推进到 Cancelled
+	mustEqual(t, env.store.byNo["C-DQ-ERR"].status, StatusCancelled, "cancelled despite queue error")
+	// anomaly 触发
+	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly fired")
+	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyDelayQueueCleanupFailed, "anomaly kind")
+}
+
+// delay-queue-cleanup-consistency：CloseByAdmin 成功路径必须清理延时队列。
+func TestCloseByAdmin_RemovesFromDelayQueue(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:    "ADM-DQ",
+		orderToken: "T-ADM-DQ",
+		userID:     1001,
+		status:     StatusPending,
+		payMethod:  PayMethodWechat,
+		expireAt:   time.Now().Add(time.Hour),
+	})
+	env.dq.enqueued["ADM-DQ"] = time.Now().Add(time.Hour)
+
+	mustNotErr(t, env.engine.CloseByAdmin(context.Background(), "ADM-DQ", "fraud"), "CloseByAdmin")
+
+	mustEqual(t, env.dq.RemoveCalls, 1, "delay queue Remove called once")
+	if _, stillEnqueued := env.dq.enqueued["ADM-DQ"]; stillEnqueued {
+		t.Fatal("expected order removed from delay queue")
+	}
+}
+
 // =============================================================================
 // CASConfirmPaid 二级金额校验（fakeStore 模拟 DB 列值）
 // =============================================================================

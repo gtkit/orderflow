@@ -4,6 +4,10 @@
 
 `github.com/gtkit/orderflow` 是一个面向**单商品虚拟交付订单（数字内容 / 虚拟商品 / 会员权益）**的流程引擎，封装订单创建、支付超时关闭、支付回调处理、履约交付、状态推送和幂等补偿等能力。核心包零第三方依赖，基础设施（数据库 / Redis / 支付网关）通过 `drivers/` 子包注入。
 
+> **生产部署接入方**：请优先阅读 [`PRODUCTION_CHECKLIST.md`](./PRODUCTION_CHECKLIST.md)
+> ——首次部署前的硬门禁清单，覆盖安全 / 幂等 / 基础设施 / 配置 / 监控告警 5 大类。
+> 漏一项可能导致资损或监控盲区。
+
 ---
 
 ## 适用场景
@@ -793,8 +797,12 @@ sequenceDiagram
 | `UnexpectedStatus` | 进入状态机未覆盖的分支 | 告警 |
 | `DeliveryFailed` | `OnPaid` 或 `FinalizePaidOrder` 失败 | 订单停在 Paid，`DeliveryFallback` 补偿 |
 | `GatewayQueryFailed` | 查询网关 3 次重试全失败 | 不尝试恢复，人工对账 |
-| `MalformedPaidNotify` | Paid 回调缺 `TransactionID` 或 `TotalAmount<=0` | 不查 DB / 不推进，等 fallback scanner 兜底 |
+| `MalformedPaidNotify` | Paid 回调缺 `TransactionID` 或 `TotalAmount<=0` | 不查 DB / 不推进；订单到期被 CloseFallback 关闭后，等下次合法 notify 走 `handleClosedPaidNotify` 重开 |
 | `DelayQueueCleanupFailed` | 订单 Paid 后清理延时关单队列失败 | 告警，CloseWorker 二次拉取做幂等 skip |
+| `AppendLogFailed` | 订单流水写入失败 | 主流程已推进；仅审计/合规链路有空洞，需告警 |
+| `SupersededGatewayCloseFailed` | 新单 supersede 旧单时本地 CAS 关闭成功但网关 CloseOrder 失败（仅 SupersededDegraded 触发） | 调 `OnSupersededGatewayCloseFailed` hook，业务方可推到自定义重试队列 |
+| `RefundGatewayFailed` | 业务侧退款编排中网关多次重试仍失败 | 核心包不主动 emit；业务方在自己的退款服务里调 `Observer.Event` |
+| `RefundDrift` | 退款异步通知状态 ≠ QueryRefund 返回状态 | 核心包不主动 emit；业务方对账时检测后 emit |
 
 ### 履约失败的兜底路径
 
@@ -1606,6 +1614,8 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 - `kind=poll_cache_get_failed`：缓存抖动（即将打爆 DB）
 
 详见 [`observer.go`](./observer.go) `EventKind` 与 `AnomalyKind` 列表。
+
+> **Observer ≠ 业务事件总线**：Observer 是运维埋点的旁路出口，不保证与业务 hook 一一对应——例如 Enqueue 失败的回滚路径会发出完整的 created→closed 事件对，但 `OnCreated` / `OnClosed` 两个 hook 一次都不会触发（业务侧未感知此订单）。业务侧消费状态跃迁请使用 hook，不要消费 Observer 事件。详见 `observer.go` 顶部"与 Hook 的语义边界"。
 
 ### 10. 启动 `worker.StartAll`
 

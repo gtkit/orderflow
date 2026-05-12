@@ -37,6 +37,25 @@ const (
 // **UnifiedOrder / CloseOrder / QueryOrder** 的实现应自身做网关通信的 TLS + 凭证管理。
 type PaymentGateway interface {
 	// UnifiedOrder 在支付网关侧创建交易，返回客户端拉起支付所需参数。
+	//
+	// # 幂等契约（实现方必须遵守）
+	//
+	// 实现方 MUST 以 req.OutTradeNo 为幂等键：相同 OutTradeNo 的重复调用必须返回
+	// 可用于拉起支付的参数，不能在网关侧创建第二笔交易。当网关返回"订单已存在且
+	// 未支付"类响应时，driver 应当：
+	//
+	//   - 优先把它识别为成功，返回原订单的支付参数；或者
+	//   - 调用 QueryOrder 重新查询并构造等价的支付参数返回。
+	//
+	// 仅在"订单已支付 / 已关闭 / 金额不匹配"等真正不可重试场景才返回 error。
+	//
+	// 为什么必须幂等：Engine 在用户复用 Pending（典型场景：前端轮询期间用户重新
+	// 拉起支付页）时会二次调用 UnifiedOrder。如果 driver 把"订单已存在"当 error
+	// 抛出，Engine 会以为下单失败，用户付不了款；如果 driver 在网关侧重复创单，
+	// 用户面对两份 prepay_id 体验割裂。
+	//
+	// 微信 V3 / 支付宝 OpenAPI 默认就是 out_trade_no 维度幂等——driver 通常只需
+	// 不要把"订单已存在"错误码当致命错误重抛即可满足契约。
 	UnifiedOrder(ctx context.Context, ch Channel, req UnifiedOrderRequest) (UnifiedOrderResponse, error)
 
 	// CloseOrder 在支付网关侧关闭交易。Engine 会对"订单不存在 / 已关闭"类错误做容忍，

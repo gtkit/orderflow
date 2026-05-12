@@ -131,6 +131,31 @@ func TestErrPath_Create_AppendLogFailureDoesNotBlock(t *testing.T) {
 	}
 }
 
+// P2#4: appendLog 失败时必须发出 EventAnomaly + kind=append_log_failed，让运维可见。
+func TestErrPath_AppendLogFailureEmitsAnomalyEvent(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.ErrOnAppendLog = errors.New("log table full")
+
+	if _, err := env.engine.Create(context.Background(), standardRequest()); err != nil {
+		t.Fatalf("Create should succeed despite log failure: %v", err)
+	}
+
+	// Observer 必须收到一条 EventAnomaly，kind = append_log_failed
+	if env.observer.countByKind(EventAnomaly) < 1 {
+		t.Fatalf("expected EventAnomaly emitted on appendLog failure")
+	}
+	ev, ok := env.observer.firstByKind(EventAnomaly)
+	if !ok {
+		t.Fatal("no anomaly event found")
+	}
+	if got := ev.Attrs["kind"]; got != string(AnomalyAppendLogFailed) {
+		t.Fatalf("anomaly kind = %v, want %s", got, AnomalyAppendLogFailed)
+	}
+	if reason, _ := ev.Attrs["reason"].(string); reason == "" {
+		t.Fatal("anomaly reason missing")
+	}
+}
+
 func TestErrPath_Create_OnCreatedHookErrorDoesNotBlock(t *testing.T) {
 	env := newTestEnv(t)
 	// 替换 OnCreated 钩子使其返回错误

@@ -31,7 +31,9 @@ func (e *Engine[O]) Close(ctx context.Context, orderNo string) (err error) {
 	}
 
 	if order.Status() != StatusPending {
-		e.logger.Debug(ctx, "orderflow: close skipped: order not pending",
+		// Cancelled / Closed / Paid 等非 Pending 状态都属于"已被并发推进或已经终态"的合法情形，
+		// 但运维排查"为什么 Close 没生效"时需要看到，故升级到 Info 级别。
+		e.logger.Info(ctx, "orderflow: close skipped: order not pending",
 			String("order_no", orderNo),
 			String("status", order.Status().String()),
 		)
@@ -84,13 +86,24 @@ func (e *Engine[O]) Close(ctx context.Context, orderNo string) (err error) {
 	return nil
 }
 
-// CloseByUser 让用户主动关闭自己的订单。
-// 相比 Close：先校验 order.UserID() == userID（不匹配返回 ErrOrderForbidden），
-// 再走标准 Close 流程。适用于"我的订单 → 取消"这类用户接口。
+// CloseByUser 让用户主动关闭自己**已过期**的订单。
 //
-// 注意：仅校验 UserID 归属；订单状态、过期时间等由下层 Close 检查。
-// 未过期的 Pending 订单仍会被 Close skip（Close 对非过期订单幂等跳过），
-// 若业务需要"立即取消未过期订单"的语义，应使用 CloseByAdmin 或调用 Store.CASClose。
+// 相比 Close：先校验 order.UserID() == userID（不匹配返回 ErrOrderForbidden），
+// 再走标准 Close 流程——Close 自身只关闭已到期的 Pending 订单（未过期会幂等 skip）。
+//
+// **适用场景**：用户在"我的订单"列表里看到的已过期未支付订单，点"关闭"按钮触发的
+// 收尾路径（释放占位、显式终止）。**不适用于**"取消未过期订单"——用户主动放弃支付
+// 请使用 [Engine.CancelByUser]，它会绕过 ExpireAt 守卫并把状态推进到 StatusCancelled
+// 而非 StatusClosed，便于业务侧统计"用户主动取消率"等指标。
+//
+// 与其他用户/后台关单方法的对比：
+//
+//   - CloseByUser：用户关闭**已过期**订单 → StatusClosed (ClosedReasonTimeout)
+//   - CancelByUser：用户**取消**未过期订单 → StatusCancelled
+//   - CloseByAdmin：后台/风控强制关单（绕过 ExpireAt） → StatusClosed (ClosedReasonManual)
+//
+// 实现细节：仅校验 UserID 归属；订单状态、过期时间等由下层 Close 检查。未过期的
+// Pending 订单走到 Close 后会被幂等 skip 并返回 nil（非错误，不向调用方传递）。
 func (e *Engine[O]) CloseByUser(ctx context.Context, userID int64, orderNo string) error {
 	order, found, err := e.store.GetByNo(ctx, orderNo)
 	if err != nil {
@@ -166,6 +179,7 @@ func (e *Engine[O]) CancelByUser(ctx context.Context, userID int64, orderNo, rea
 	if affected == 0 {
 		// 状态被并发推进——常见情形：支付回调先到、其他实例先取消。skip。
 		// 复查并审计：与 Close 的 recheck 行为对齐，便于排查"取消失败但状态变了"竞态。
+		// CAS 抢跑失败时**不**清理延时队列——订单已不在本路径责任范围内。
 		current, ok, qErr := e.store.GetByNo(ctx, orderNo)
 		if qErr != nil {
 			return fmt.Errorf("orderflow: recheck after cancel race: %w", qErr)
@@ -177,6 +191,7 @@ func (e *Engine[O]) CancelByUser(ctx context.Context, userID int64, orderNo, rea
 		return nil
 	}
 
+	e.cleanupDelayQueueAfterTerminal(ctx, order)
 	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusCancelled, order.ExpireAt())
 	remark := "user cancelled"
 	if reason != "" {
@@ -253,6 +268,7 @@ func (e *Engine[O]) CloseByAdmin(ctx context.Context, orderNo, reason string) er
 	if affected == 0 {
 		// 状态被并发推进——常见情形：支付回调先到。Close 路径的标准行为是 skip。
 		// 复查并审计：与 Close 的 recheck 行为对齐，便于排查"管理员关单失败但状态变了"竞态。
+		// CAS 抢跑失败时**不**清理延时队列——订单已不在本路径责任范围内。
 		current, ok, qErr := e.store.GetByNo(ctx, orderNo)
 		if qErr != nil {
 			return fmt.Errorf("orderflow: recheck after admin close race: %w", qErr)
@@ -264,6 +280,7 @@ func (e *Engine[O]) CloseByAdmin(ctx context.Context, orderNo, reason string) er
 		return nil
 	}
 
+	e.cleanupDelayQueueAfterTerminal(ctx, order)
 	e.publishStatus(ctx, order.OrderToken(), order.UserID(), StatusClosed, order.ExpireAt())
 	remark := "admin force close"
 	if reason != "" {

@@ -87,9 +87,14 @@ type Application struct {
 }
 
 // RefundService 业务侧退款服务。库内不引入此类型，由业务方自行实现。
+//
+// observer 字段是可选的——核心包不强制 emit 退款事件。当业务方注入 Observer 时，
+// 本示例在关键时机用 orderflow.EventRefund* / AnomalyRefund* 常量 emit，
+// 让监控可统一识别。完整 attribute schema 见 refund_observability.md。
 type RefundService struct {
-	db      *sql.DB
-	gateway orderflow.RefundGateway
+	db       *sql.DB
+	gateway  orderflow.RefundGateway
+	observer orderflow.Observer
 }
 
 // Apply 处理"审批通过"事件：发起退款 → CAS 落终态。
@@ -111,6 +116,17 @@ func (s *RefundService) Apply(ctx context.Context, a Application) error {
 			return s.reconcile(ctx, a)
 		}
 		return fmt.Errorf("insert refund record: %w", err)
+	}
+
+	// 退款发起 emit（推荐 attrs 见 refund_observability.md）
+	if s.observer != nil {
+		s.observer.Event(ctx, orderflow.EventRefundInitiated, a.OrderNo, map[string]any{
+			"out_refund_no": a.ID,
+			"out_trade_no":  a.OrderNo,
+			"refund_amount": a.Amount,
+			"channel":       string(a.Channel),
+			"reason":        a.Reason,
+		})
 	}
 
 	// Step 2：事务外调网关
@@ -201,6 +217,15 @@ func (s *RefundService) HandleNotify(ctx context.Context, ch orderflow.Channel, 
 	}
 }
 
+// loadChannel 读取本地记录的支付渠道，仅供 Observer emit 用。
+// 真实业务方可缓存或合并 query；这里保持最简形态。
+func (s *RefundService) loadChannel(ctx context.Context, refundID string) orderflow.Channel {
+	var ch string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT channel FROM business_refund_records WHERE id = ?`, refundID).Scan(&ch)
+	return orderflow.Channel(ch)
+}
+
 // verifyNotify 业务侧二次校验：channel / amount 一致性。
 func (s *RefundService) verifyNotify(ctx context.Context, ch orderflow.Channel, n orderflow.RefundNotifyResult) error {
 	var (
@@ -253,6 +278,20 @@ func (s *RefundService) markResolved(
 	if affected == 0 {
 		// 已处理过的回调（重复回调或并发竞争失败者）——不再触发反向核销
 		return nil
+	}
+
+	// 终态 emit（推荐 attrs 见 refund_observability.md）
+	if s.observer != nil {
+		evt := orderflow.EventRefundFailed
+		if status == orderflow.RefundTradeStatusSucceeded {
+			evt = orderflow.EventRefundSucceeded
+		}
+		s.observer.Event(ctx, evt, refundID, map[string]any{
+			"out_refund_no":     refundID,
+			"channel":           string(s.loadChannel(ctx, refundID)),
+			"gateway_refund_id": gatewayRefundID,
+			"succeeded_at":      succeededAt,
+		})
 	}
 
 	if status != orderflow.RefundTradeStatusSucceeded {
@@ -333,6 +372,7 @@ func main() {
 	_ = (&RefundService{}).revokeBenefits
 	_ = (&RefundService{}).verifyNotify
 	_ = (&RefundService{}).enqueueRevokeRetry
+	_ = (&RefundService{}).loadChannel
 	_ = isPKConflict
 	fmt.Println("refund_quickstart compiled successfully")
 }

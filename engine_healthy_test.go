@@ -38,3 +38,36 @@ func TestHealthy_AggregatesErrors(t *testing.T) {
 		t.Errorf("error should reference Cache + reason, got %v", err)
 	}
 }
+
+// P2#6: PaymentGateway 实现 Healther 时 Engine.Healthy 必须包含它。
+type fakeGatewayWithPing struct {
+	*fakeGateway
+	pingErr error
+}
+
+func (g *fakeGatewayWithPing) Ping(_ context.Context) error { return g.pingErr }
+
+func TestHealthy_ProbesPaymentGatewayWhenImplemented(t *testing.T) {
+	t.Run("Gateway 实现 Healther 且失败 -> Healthy 返回带 PaymentGateway 前缀的错误", func(t *testing.T) {
+		env := newTestEnv(t)
+		env.engine.gateway = &fakeGatewayWithPing{
+			fakeGateway: env.gw,
+			pingErr:     errors.New("alipay api unreachable"),
+		}
+		err := env.engine.Healthy(context.Background())
+		if err == nil {
+			t.Fatal("expected error from Healthy when gateway Ping fails")
+		}
+		if !strings.Contains(err.Error(), "PaymentGateway") || !strings.Contains(err.Error(), "alipay api unreachable") {
+			t.Errorf("error should reference PaymentGateway + reason, got %v", err)
+		}
+	})
+
+	t.Run("Gateway 不实现 Healther -> Healthy 不报错（保留历史行为）", func(t *testing.T) {
+		env := newTestEnv(t)
+		// env.gw 本身不实现 Healther
+		if err := env.engine.Healthy(context.Background()); err != nil {
+			t.Fatalf("expected nil error when gateway lacks Healther, got %v", err)
+		}
+	})
+}

@@ -1,6 +1,7 @@
 package orderflow
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -162,6 +163,71 @@ func TestNew_GettersReturnInjectedValues(t *testing.T) {
 	if env.engine.Location() == nil {
 		t.Error("Location() returned nil")
 	}
+}
+
+// P1#1: OnPaid 幂等启动检测——配置 OnPaid 但未 opt-out 时应 Warn；opt-out 则不 Warn。
+func TestNew_WarnsWhenOnPaidLacksIdempotencyGuard(t *testing.T) {
+	t.Run("OnPaid set without opt-out -> Warn", func(t *testing.T) {
+		rec := &recordingLogger{}
+		cfg := Config[*testOrder]{
+			Store:      newFakeStore(),
+			Gateway:    newFakeGateway(),
+			DelayQueue: newFakeDelayQueue(),
+			Cache:      newFakeCache(),
+			Stream:     newFakeStream(),
+			Logger:     rec,
+			OnPaid: func(_ context.Context, _ *testOrder, _ NotifyResult) error {
+				return nil
+			},
+		}
+		if _, err := New[*testOrder](cfg); err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if !rec.warnContains("OnPaid configured without explicit idempotency opt-out") {
+			t.Fatalf("expected idempotency warn; got warns=%v", rec.Warns)
+		}
+	})
+
+	t.Run("OnPaid set with opt-out -> silent", func(t *testing.T) {
+		rec := &recordingLogger{}
+		cfg := Config[*testOrder]{
+			Store:                     newFakeStore(),
+			Gateway:                   newFakeGateway(),
+			DelayQueue:                newFakeDelayQueue(),
+			Cache:                     newFakeCache(),
+			Stream:                    newFakeStream(),
+			Logger:                    rec,
+			SkipOnPaidIdempotencyWarn: true,
+			OnPaid: func(_ context.Context, _ *testOrder, _ NotifyResult) error {
+				return nil
+			},
+		}
+		if _, err := New[*testOrder](cfg); err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if rec.warnContains("OnPaid configured without explicit idempotency opt-out") {
+			t.Fatalf("expected no warn when opt-out; got warns=%v", rec.Warns)
+		}
+	})
+
+	t.Run("OnPaid nil -> silent", func(t *testing.T) {
+		rec := &recordingLogger{}
+		cfg := Config[*testOrder]{
+			Store:      newFakeStore(),
+			Gateway:    newFakeGateway(),
+			DelayQueue: newFakeDelayQueue(),
+			Cache:      newFakeCache(),
+			Stream:     newFakeStream(),
+			Logger:     rec,
+			// OnPaid 未设置
+		}
+		if _, err := New[*testOrder](cfg); err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if rec.warnContains("OnPaid configured without explicit idempotency opt-out") {
+			t.Fatalf("no OnPaid configured but still warned; got warns=%v", rec.Warns)
+		}
+	})
 }
 
 func TestResolveLocation(t *testing.T) {
