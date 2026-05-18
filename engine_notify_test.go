@@ -422,6 +422,113 @@ func TestHandleNotify_ClosedButGatewayReportsNotPaid(t *testing.T) {
 	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyPaidOnClosed, "anomaly kind")
 }
 
+func TestHandleNotify_CancelledPaidConfirmedDoesNotReopenOrFinalize(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:       "NO-CANCELLED-PAID",
+		orderToken:    "T-CANCELLED-PAID",
+		userID:        1001,
+		status:        StatusCancelled,
+		payAmount:     9900,
+		originalPrice: 9900,
+		productTitle:  "VIP",
+		payMethod:     PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CANCELLED-PAID", 9900, "TXN-CANCELLED-PAID")
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:    "NO-CANCELLED-PAID",
+		TransactionID: "TXN-CANCELLED-PAID",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+		PaidAt:        time.Now(),
+		Channel:       "wechat",
+	}
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	mustEqual(t, env.gw.QueryOrderCalls, 1, "QueryOrder called")
+	mustEqual(t, env.store.byNo["NO-CANCELLED-PAID"].status, StatusCancelled, "status unchanged")
+	mustEqual(t, env.store.CASConfirmPaidCalls, 0, "no confirm")
+	mustEqual(t, env.store.CASReopenPaidCalls, 0, "no reopen")
+	mustEqual(t, env.store.FinalizeCalls, 0, "no finalize")
+	mustLen(t, env.OnPaidCalls, 0, "no OnPaid")
+	mustLen(t, env.OnReopenedCalls, 0, "no OnReopened")
+	mustLen(t, env.OnDeliveredCalls, 0, "no OnDelivered")
+	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly")
+	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyPaidOnCancelled, "anomaly kind")
+	mustLen(t, env.store.logs, 1, "audit log")
+	mustEqual(t, env.store.logs[0].FromStatus, StatusCancelled, "log from")
+	mustEqual(t, env.store.logs[0].ToStatus, StatusCancelled, "log to")
+}
+
+func TestHandleNotify_CancelledButGatewayQueryKeepsFailing(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:   "NO-CAN-QERR",
+		status:    StatusCancelled,
+		payAmount: 9900,
+		payMethod: PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CAN-QERR", 9900, "TXN")
+	env.gw.QueryErr = errTestQueryDown
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	mustEqual(t, env.gw.QueryOrderCalls, 3, "Query retried 3 times")
+	mustEqual(t, env.store.byNo["NO-CAN-QERR"].status, StatusCancelled, "status unchanged")
+	mustEqual(t, env.store.CASReopenPaidCalls, 0, "no reopen")
+	mustEqual(t, env.store.FinalizeCalls, 0, "no finalize")
+	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly")
+	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyGatewayQueryFailed, "anomaly kind")
+}
+
+func TestHandleNotify_CancelledQueryAmountMismatch(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:   "NO-CAN-AM",
+		status:    StatusCancelled,
+		payAmount: 9900,
+		payMethod: PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CAN-AM", 9900, "TXN")
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:  "NO-CAN-AM",
+		TradeStatus: TradeStatusPaid,
+		TotalAmount: 1,
+	}
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	mustEqual(t, env.store.byNo["NO-CAN-AM"].status, StatusCancelled, "status unchanged")
+	mustEqual(t, env.store.CASReopenPaidCalls, 0, "no reopen")
+	mustEqual(t, env.store.FinalizeCalls, 0, "no finalize")
+	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly")
+	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyAmountMismatch, "anomaly kind")
+}
+
+func TestHandleNotify_CancelledButGatewayReportsNotPaid(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:   "NO-CAN-UNPAID",
+		status:    StatusCancelled,
+		payAmount: 9900,
+		payMethod: PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CAN-UNPAID", 9900, "TXN")
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:  "NO-CAN-UNPAID",
+		TradeStatus: TradeStatusUnpaid,
+	}
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	mustEqual(t, env.store.byNo["NO-CAN-UNPAID"].status, StatusCancelled, "status unchanged")
+	mustEqual(t, env.store.CASReopenPaidCalls, 0, "no reopen")
+	mustEqual(t, env.store.FinalizeCalls, 0, "no finalize")
+	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly")
+	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyPaidOnCancelled, "anomaly kind")
+}
+
 func TestHandleNotify_CASRaceFallsIntoPaidRetry(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
@@ -446,7 +553,7 @@ func TestHandleNotify_UnexpectedStatusRaisesAnomaly(t *testing.T) {
 	env := newTestEnv(t)
 	env.store.seed(&testOrder{
 		orderNo:   "NO-CAN",
-		status:    StatusCancelled, // 非 Pending/Paid/Closed/Delivered/Completed 之外
+		status:    OrderStatus(99),
 		payAmount: 9900,
 		payMethod: PayMethodWechat,
 	})
@@ -617,12 +724,21 @@ func TestHandleNotify_RecheckSeesCancelledAfterCASMiss(t *testing.T) {
 	env.gw.NotifyResult = makeNotify("NO-CN-R", 9900, "TXN")
 	cancelledStatus := StatusCancelled
 	env.store.ConfirmPaidRaceToStatus = &cancelledStatus
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:    "NO-CN-R",
+		TransactionID: "TXN",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+	}
 
 	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
 
-	// Cancelled（未预期状态）分支 → Anomaly UnexpectedStatus
+	mustEqual(t, env.gw.QueryOrderCalls, 1, "QueryOrder called")
+	mustEqual(t, env.store.byNo["NO-CN-R"].status, StatusCancelled, "status unchanged")
+	mustEqual(t, env.store.CASReopenPaidCalls, 0, "no reopen")
+	mustEqual(t, env.store.FinalizeCalls, 0, "no finalize")
 	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly fired")
-	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyUnexpectedStatus, "anomaly kind")
+	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyPaidOnCancelled, "anomaly kind")
 }
 
 func TestHandleNotify_RecheckSeesDisappearedAfterCASMiss(t *testing.T) {

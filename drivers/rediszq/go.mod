@@ -3,7 +3,7 @@ module github.com/gtkit/orderflow/drivers/rediszq
 go 1.26
 
 require (
-	github.com/alicebob/miniredis/v2 v2.37.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/gtkit/orderflow v1.11.0
 	github.com/redis/go-redis/v9 v9.19.0
 )

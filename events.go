@@ -24,6 +24,10 @@ const (
 	AnomalyTradeNoMismatch AnomalyKind = "trade_no_mismatch"
 	// AnomalyPaidOnClosed 已关闭的订单收到支付成功的回调。
 	AnomalyPaidOnClosed AnomalyKind = "paid_on_closed"
+	// AnomalyPaidOnCancelled 已取消的订单收到支付成功回调。Engine 会向支付网关
+	// QueryOrder 复核；复核确认已支付且金额匹配时，订单仍保持 StatusCancelled，
+	// 不恢复、不履约。业务方应监听此异常并进入退款、对账或人工处理流程。
+	AnomalyPaidOnCancelled AnomalyKind = "paid_on_cancelled"
 	// AnomalyOrderDisappeared CAS 失败后 recheck 发现订单已消失。
 	AnomalyOrderDisappeared AnomalyKind = "order_disappeared"
 	// AnomalyUnexpectedStatus 订单处于状态机未覆盖的状态。

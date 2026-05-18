@@ -17,6 +17,9 @@ package orderflow
 //	Paid      -> Delivered | Closed (特殊：Closed 后又支付成功，由 CASReopenPaid 恢复)
 //	Delivered -> Completed
 //	其余状态（Completed / Closed / Cancelled）为终态，不再跃迁。
+//
+// 特别注意：StatusCancelled 收到支付成功回调时不会像 StatusClosed 一样恢复到 Paid；
+// Engine 只做网关复核、异常记录与审计流水，后续退款 / 对账由业务方处理。
 type OrderStatus int8
 
 const (
@@ -76,7 +79,8 @@ func (s OrderStatus) IsTerminal() bool {
 }
 
 // CanTransitionTo 判断从当前状态到目标状态是否是合法跃迁。
-// 注意：CASReopenPaid 是对 "Closed -> Paid" 的例外恢复路径，不走此表。
+// 注意：CASReopenPaid 是对 "Closed -> Paid" 的例外恢复路径，不走此表；
+// "Cancelled -> Paid" 不是合法恢复路径。
 func (s OrderStatus) CanTransitionTo(next OrderStatus) bool {
 	switch s {
 	case StatusPending:

@@ -125,7 +125,7 @@
 
 ## 5. 监控告警规则（生产事故的最后一道防线）
 
-Engine 通过 `EventAnomaly` Observer 事件上报 13 类异常。**全部都值得配告警**——按优先级：
+Engine 通过 `EventAnomaly` Observer 事件上报 14 类异常。**全部都值得配告警**——按优先级：
 
 ### 5.1 P0 级（必须配告警，事故级）
 
@@ -141,6 +141,9 @@ Engine 通过 `EventAnomaly` Observer 事件上报 13 类异常。**全部都值
 
 - [ ] **`AnomalyAmountMismatch`** —— notify 金额 ≠ 订单金额。可能是渠道侧 bug 或攻击。
   Engine 不推进状态，需人工介入。
+
+- [ ] **`AnomalyPaidOnCancelled`** —— 用户已取消但之后收到 paid notify。Engine 会 QueryOrder
+  复核，但即使确认已支付也不会恢复 / 履约，需进入退款、对账或人工处理流程。
 
 - [ ] **`AnomalyOrderDisappeared`** —— CAS 失败后 recheck 发现订单消失。数据完整性事故。
 

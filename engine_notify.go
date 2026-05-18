@@ -16,6 +16,7 @@ import (
 //     - Delivered/Completed：幂等 skip；
 //     - Paid：重入 finalize（OnPaid + FinalizePaidOrder）；
 //     - Closed：走"关闭后又支付成功"的恢复路径；
+//     - Cancelled：向网关复核，确认已支付也只记异常 / 流水，不恢复、不履约；
 //     - Pending：金额校验 + CAS 推进 Paid + finalize；
 //  4. 中间步骤失败不会返回错误给网关，避免重试风暴；由 fallback scanner 兜底。
 //
@@ -101,6 +102,8 @@ func (e *Engine[O]) HandleNotify(ctx context.Context, ch Channel, req *http.Requ
 		return e.retryFinalizeForPaid(ctx, order, notify)
 	case StatusClosed:
 		return e.handleClosedPaidNotify(ctx, order, notify)
+	case StatusCancelled:
+		return e.handleCancelledPaidNotify(ctx, order, notify)
 	case StatusPending:
 		// 继续下方的主流程
 	default:
@@ -213,11 +216,48 @@ func (e *Engine[O]) recheckAfterCASFailed(ctx context.Context, notify NotifyResu
 		return nil
 	case StatusClosed:
 		return e.handleClosedPaidNotify(ctx, current, notify)
+	case StatusCancelled:
+		return e.handleCancelledPaidNotify(ctx, current, notify)
 	default:
 		e.recordAnomaly(ctx, current, AnomalyUnexpectedStatus,
 			fmt.Sprintf("CAS failed with unexpected status: %s", current.Status()))
 		return nil
 	}
+}
+
+// handleCancelledPaidNotify 处理"用户已取消但支付网关又推送已支付"的异常。
+// StatusCancelled 是用户主动取消后的终态：即使网关复核确认已支付，也只记录异常与
+// 订单流水，不恢复订单、不触发履约。后续退款或人工对账由业务方监听 anomaly 处理。
+func (e *Engine[O]) handleCancelledPaidNotify(ctx context.Context, order O, notify NotifyResult) error {
+	channel := e.resolveChannelOf(order.PayMethod())
+
+	query, err := retryN(ctx, 3, 100*time.Millisecond, func() (QueryResult, error) {
+		return e.gateway.QueryOrder(ctx, channel, order.OrderNo())
+	})
+	if err != nil {
+		e.recordAnomaly(ctx, order, AnomalyGatewayQueryFailed, err.Error())
+		return nil
+	}
+
+	if query.TradeStatus != TradeStatusPaid {
+		e.recordAnomaly(ctx, order, AnomalyPaidOnCancelled,
+			fmt.Sprintf("cancelled order notify but gateway status=%s, skip", query.TradeStatus))
+		return nil
+	}
+	if query.TotalAmount != order.PayAmount() {
+		e.recordAnomaly(ctx, order, AnomalyAmountMismatch,
+			fmt.Sprintf("cancelled paid mismatch: gateway=%d order=%d", query.TotalAmount, order.PayAmount()))
+		return nil
+	}
+
+	confirmed := buildConfirmedNotify(notify, query, channel)
+	e.normalizeNotifyPaidAt(&confirmed)
+
+	e.recordAnomaly(ctx, order, AnomalyPaidOnCancelled,
+		fmt.Sprintf("cancelled order paid: trade_no=%s amount=%d", confirmed.TransactionID, confirmed.TotalAmount))
+	e.appendLog(ctx, order, StatusCancelled, StatusCancelled, "system",
+		"paid after cancellation: trade_no="+confirmed.TransactionID)
+	return nil
 }
 
 // handleClosedPaidNotify 处理"订单已关闭但支付网关确认已支付"的竞态。

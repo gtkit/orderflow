@@ -19,7 +19,7 @@
 - **单商品订单**：一笔订单对应一个商品 / 服务 / 权益
 - **虚拟交付**：数字内容（文本 / 视频 / 音频）、虚拟商品、会员权益激活——无物流的交付
 - **中国大陆主流三方支付**：微信、支付宝、银联（通过 `paymgrgw` driver）
-- **支付回调驱动的状态机**：订单状态严格遵循 `Pending → Paid → Delivered`，支持「已关闭后又支付成功」的恢复路径
+- **支付回调驱动的状态机**：订单状态严格遵循 `Pending → Paid → Delivered`，支持「已关闭后又支付成功」的恢复路径，并对「已取消后又支付成功」做专用异常处理
 - **延时关单 + 幂等履约**：支付超时自动关闭、回调 / 履约钩子幂等重试
 - **退款（自行编排）**：v1.7.0+ 提供 `RefundGateway` 协议层抽象（屏蔽微信 / 支付宝退款 SDK 差异），编排由调用方自行实现——审批工作流、金额计算、退款记录持久化、反向核销均由业务方控制
 
@@ -663,8 +663,8 @@ func notifyHandler(engine *orderflow.Engine[*myorder.Order], gateway orderflow.P
                 │  │ CASReopenPaid（特殊路径：关闭后网关确认已付）
                 │  │
                 ▼  │
-              Closed / Cancelled
-                 (终态，除非 CASReopenPaid 恢复)
+              Closed        Cancelled
+           (可特殊恢复)     (不恢复)
 ```
 
 合法跃迁表（[`status.go`](./status.go) `CanTransitionTo`）：
@@ -676,7 +676,7 @@ func notifyHandler(engine *orderflow.Engine[*myorder.Order], gateway orderflow.P
 | `Delivered`（20） | `Completed` |
 | `Completed`（30）/ `Closed`（40）/ `Cancelled`（50） | 终态，不再跃迁 |
 
-`OrderStatus.IsTerminal()` 对 `Completed` / `Closed` / `Cancelled` 三个状态返回 `true`。
+`OrderStatus.IsTerminal()` 对 `Completed` / `Closed` / `Cancelled` 三个状态返回 `true`。其中 `Closed` 在网关确认已支付时可通过 `CASReopenPaid` 特殊恢复；`Cancelled` 表示用户主动取消，即使后续网关确认已支付也不恢复、不履约，只进入异常对账。
 
 支付超时仍然走 `Pending -> Closed (reason=timeout)`，不区分独立的 Expired 状态。关闭原因通过 `ClosedReason` 枚举区分（`timeout` / `superseded` / `manual` / `enqueue_fail`）。
 
@@ -786,6 +786,19 @@ sequenceDiagram
 - **`CASReopenPaid` 独立 CAS 方法**：和 `CASConfirmPaid` 语义分离，driver 可以单独做审计日志/报警；affected=0 表示并发已处理完，当次 skip。
 - **OnReopened 先触发、OnPaid 后触发**：给业务一个"知道这是异常恢复单"的专用钩子；`OnPaid` 幂等约束保证即便此路径重入也不重复发放权益。
 
+### 特殊路径：订单已取消，之后收到支付成功回调
+
+`StatusCancelled` 表示用户主动取消。和超时 / 系统型 `StatusClosed` 不同，Engine **不会**把已取消订单恢复为 `Paid`，也不会发货或发放权益。
+
+**处理策略**：
+- `HandleNotify` 看到 `StatusCancelled` + Paid notify 时，先调用 `QueryOrder` 复核网关真实状态。
+- 网关确认 Paid 且金额匹配：订单保持 `Cancelled`，记录 `AnomalyPaidOnCancelled`，追加 `Cancelled -> Cancelled` 审计流水，返回 nil 给网关。
+- 网关查询失败：记录 `AnomalyGatewayQueryFailed`，不恢复。
+- 网关金额不匹配：记录 `AnomalyAmountMismatch`，不恢复。
+- 网关未确认 Paid：记录 `AnomalyPaidOnCancelled`，不恢复。
+
+业务方应监听 `paid_on_cancelled` anomaly，进入退款、对账或人工处理流程。不要在 `OnAnomaly` 内直接补发权益；这会绕过用户取消意图。
+
 ### 其它异常路径（会触发 `OnAnomaly`）
 
 | `AnomalyKind` | 触发场景 | Engine 动作 |
@@ -793,6 +806,7 @@ sequenceDiagram
 | `AmountMismatch` | notify 金额 ≠ 订单金额 | 不推进状态，等人工介入 |
 | `TradeNoMismatch` | 同一订单不同 notify 出现不同 tradeNo | 不推进状态 |
 | `PaidOnClosed` | Closed 订单收到 notify，但网关查询非 Paid | 不 reopen，仅告警 |
+| `PaidOnCancelled` | Cancelled 订单收到 paid notify，网关复核后仍需对账 | 不恢复、不履约；记录流水并告警 |
 | `OrderDisappeared` | CAS 失败后 recheck 发现订单消失 | ALERT 日志 + 告警 |
 | `UnexpectedStatus` | 进入状态机未覆盖的分支 | 告警 |
 | `DeliveryFailed` | `OnPaid` 或 `FinalizePaidOrder` 失败 | 订单停在 Paid，`DeliveryFallback` 补偿 |
@@ -1025,6 +1039,8 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 ⚠ **鉴权强约束**：`userID` 必须来自鉴权后的可信身份（JWT Claims / Session），**禁止**直接接受请求体里的 `user_id`。Engine 内已校验 `order.UserID() == userID`，不匹配返回 `ErrOrderForbidden`。
 
 流程：身份校验 → 网关 `CloseOrder`（带重试 + 可忽略错误）→ `CASCancel` → `publishStatus` → `appendLog`（actor=`user`）→ `EventOrderCancelled` 事件 → `OnCancelled` 钩子。非 Pending 状态直接 skip 返回 nil（幂等）。
+
+取消后如果又收到支付成功回调，`HandleNotify` 会走 `StatusCancelled` 专用异常路径：向网关复核后仍保持 `Cancelled`，不恢复、不履约，由 `AnomalyPaidOnCancelled` 驱动退款 / 对账处理。
 
 ```mermaid
 flowchart TD
@@ -1609,6 +1625,7 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 实现 `orderflow.Observer` 把 `Event` / `Duration` 翻译成 Prometheus counter / histogram（或 OpenTelemetry span）。**重点告警** `EventAnomaly` 系列——尤其是：
 
 - `kind=hook_panic`：业务钩子 panic（被 recover 但需修 bug）
+- `kind=paid_on_cancelled`：用户已取消但网关确认或疑似支付成功，必须进入退款 / 对账
 - `kind=append_log_failed`：流水写入失败（合规风险）
 - `kind=publish_status_cache_inconsistent`：缓存与状态不一致（用户可能轮询到错误状态）
 - `kind=poll_cache_get_failed`：缓存抖动（即将打爆 DB）

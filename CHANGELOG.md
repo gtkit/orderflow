@@ -6,6 +6,8 @@
 
 ### Added
 
+- 新增 `AnomalyPaidOnCancelled` 异常类型。`StatusCancelled` 订单收到 Paid 回调时，Engine 会先 `QueryOrder` 复核；确认已支付且金额匹配也保持 `Cancelled`，不恢复、不履约，并通过 anomaly 与订单流水提示业务方进入退款 / 对账 / 人工处理。
+
 ### Changed
 
 ### Deprecated
