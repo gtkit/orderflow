@@ -823,7 +823,8 @@ type testEnv struct {
 	OnAnomalyCalls                 []onAnomalyCall
 
 	// Hook behavior injection
-	OnPaidErr error
+	OnPaidErr     error
+	OnAnomalyHook func(context.Context, *testOrder, AnomalyKind, string)
 }
 
 func newTestEnv(t testing.TB) *testEnv {
@@ -897,7 +898,11 @@ func newTestEnv(t testing.TB) *testEnv {
 		OnAnomaly: func(_ context.Context, o *testOrder, kind AnomalyKind, detail string) {
 			env.mu.Lock()
 			env.OnAnomalyCalls = append(env.OnAnomalyCalls, onAnomalyCall{o.OrderNo(), kind, detail})
+			hook := env.OnAnomalyHook
 			env.mu.Unlock()
+			if hook != nil {
+				hook(context.Background(), o, kind, detail)
+			}
 		},
 	}
 	eng, err := New[*testOrder](cfg)
@@ -954,4 +959,30 @@ func mustLen[T any](t *testing.T, got []T, want int, msg string) {
 	if len(got) != want {
 		t.Fatalf("%s: len=%d, want %d (got=%v)", msg, len(got), want, got)
 	}
+}
+
+func attrString(t *testing.T, attrs map[string]any, key string) string {
+	t.Helper()
+	got, ok := attrs[key]
+	if !ok {
+		t.Fatalf("attrs[%q] missing in %+v", key, attrs)
+	}
+	s, ok := got.(string)
+	if !ok {
+		t.Fatalf("attrs[%q] type=%T want string", key, got)
+	}
+	return s
+}
+
+func attrInt64(t *testing.T, attrs map[string]any, key string) int64 {
+	t.Helper()
+	got, ok := attrs[key]
+	if !ok {
+		t.Fatalf("attrs[%q] missing in %+v", key, attrs)
+	}
+	n, ok := got.(int64)
+	if !ok {
+		t.Fatalf("attrs[%q] type=%T want int64", key, got)
+	}
+	return n
 }

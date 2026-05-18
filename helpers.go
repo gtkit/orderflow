@@ -162,15 +162,25 @@ func (e *Engine[O]) appendLog(ctx context.Context, order O, from, to OrderStatus
 
 // recordAnomaly 记录业务异常：打 error 日志 + 触发 Observer 事件 + 调用 OnAnomaly 钩子（如配置）。
 func (e *Engine[O]) recordAnomaly(ctx context.Context, order O, kind AnomalyKind, detail string) {
+	e.recordAnomalyAttrs(ctx, order, kind, detail, nil)
+}
+
+// recordAnomalyAttrs 记录带结构化 Observer 属性的业务异常。
+// attrs 只进入 Observer.Event；OnAnomaly 保持原签名，继续通过 detail 传递可读摘要。
+func (e *Engine[O]) recordAnomalyAttrs(ctx context.Context, order O, kind AnomalyKind, detail string, attrs map[string]any) {
 	e.logger.Error(ctx, "orderflow: ALERT anomaly",
 		String("order_no", order.OrderNo()),
 		String("kind", string(kind)),
 		String("detail", detail),
 	)
-	e.observer.Event(ctx, EventAnomaly, order.OrderNo(), map[string]any{
+	eventAttrs := map[string]any{
 		"kind":   string(kind),
 		"detail": detail,
-	})
+	}
+	for k, v := range attrs {
+		eventAttrs[k] = v
+	}
+	e.observer.Event(ctx, EventAnomaly, order.OrderNo(), eventAttrs)
 	if e.onAnomaly != nil {
 		e.safeHook(ctx, "OnAnomaly", order.OrderNo(), func() {
 			e.onAnomaly(ctx, order, kind, detail)

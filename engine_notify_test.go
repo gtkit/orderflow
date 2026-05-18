@@ -459,6 +459,52 @@ func TestHandleNotify_CancelledPaidConfirmedDoesNotReopenOrFinalize(t *testing.T
 	mustLen(t, env.store.logs, 1, "audit log")
 	mustEqual(t, env.store.logs[0].FromStatus, StatusCancelled, "log from")
 	mustEqual(t, env.store.logs[0].ToStatus, StatusCancelled, "log to")
+	ev, ok := env.observer.firstByKind(EventAnomaly)
+	if !ok {
+		t.Fatal("anomaly event not found in observer")
+	}
+	mustEqual(t, attrString(t, ev.Attrs, "kind"), string(AnomalyPaidOnCancelled), "observer anomaly kind")
+	mustEqual(t, attrString(t, ev.Attrs, "trade_no"), "TXN-CANCELLED-PAID", "observer trade_no")
+	mustEqual(t, attrInt64(t, ev.Attrs, "amount"), int64(9900), "observer amount")
+	mustEqual(t, attrString(t, ev.Attrs, "gateway_status"), string(TradeStatusPaid), "observer gateway_status")
+}
+
+func TestHandleNotify_CancelledPaidOnAnomalySeesAuditLog(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:       "NO-CANCELLED-HOOK",
+		orderToken:    "T-CANCELLED-HOOK",
+		userID:        1001,
+		status:        StatusCancelled,
+		payAmount:     9900,
+		originalPrice: 9900,
+		productTitle:  "VIP",
+		payMethod:     PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CANCELLED-HOOK", 9900, "TXN-CANCELLED-HOOK")
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:    "NO-CANCELLED-HOOK",
+		TransactionID: "TXN-CANCELLED-HOOK",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+		PaidAt:        time.Now(),
+		Channel:       "wechat",
+	}
+	var logsSeenInHook int
+	env.OnAnomalyHook = func(ctx context.Context, o *testOrder, kind AnomalyKind, _ string) {
+		if kind != AnomalyPaidOnCancelled {
+			return
+		}
+		logs, err := env.store.ListLogsByOrderNo(ctx, o.OrderNo())
+		if err != nil {
+			t.Fatalf("ListLogsByOrderNo in OnAnomaly: %v", err)
+		}
+		logsSeenInHook = len(logs)
+	}
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	mustEqual(t, logsSeenInHook, 1, "audit log visible inside OnAnomaly")
 }
 
 func TestHandleNotify_CancelledButGatewayQueryKeepsFailing(t *testing.T) {

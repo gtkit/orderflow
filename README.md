@@ -792,12 +792,12 @@ sequenceDiagram
 
 **处理策略**：
 - `HandleNotify` 看到 `StatusCancelled` + Paid notify 时，先调用 `QueryOrder` 复核网关真实状态。
-- 网关确认 Paid 且金额匹配：订单保持 `Cancelled`，记录 `AnomalyPaidOnCancelled`，追加 `Cancelled -> Cancelled` 审计流水，返回 nil 给网关。
+- 网关确认 Paid 且金额匹配：订单保持 `Cancelled`，先追加 `Cancelled -> Cancelled` 审计流水，再触发 `AnomalyPaidOnCancelled`，返回 nil 给网关。`OnAnomaly` 内查询流水时可以看到这条审计记录。
 - 网关查询失败：记录 `AnomalyGatewayQueryFailed`，不恢复。
 - 网关金额不匹配：记录 `AnomalyAmountMismatch`，不恢复。
 - 网关未确认 Paid：记录 `AnomalyPaidOnCancelled`，不恢复。
 
-业务方应监听 `paid_on_cancelled` anomaly，进入退款、对账或人工处理流程。不要在 `OnAnomaly` 内直接补发权益；这会绕过用户取消意图。
+业务方应监听 `paid_on_cancelled` anomaly，进入退款、对账或人工处理流程。Observer 的 anomaly attributes 会包含 `trade_no`、`amount`、`gateway_status`，便于监控或工单系统直接建单。不要在 `OnAnomaly` 内直接补发权益；这会绕过用户取消意图。
 
 ### 其它异常路径（会触发 `OnAnomaly`）
 
@@ -1625,7 +1625,7 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 实现 `orderflow.Observer` 把 `Event` / `Duration` 翻译成 Prometheus counter / histogram（或 OpenTelemetry span）。**重点告警** `EventAnomaly` 系列——尤其是：
 
 - `kind=hook_panic`：业务钩子 panic（被 recover 但需修 bug）
-- `kind=paid_on_cancelled`：用户已取消但网关确认或疑似支付成功，必须进入退款 / 对账
+- `kind=paid_on_cancelled`：用户已取消但网关确认或疑似支付成功，必须进入退款 / 对账；确认已支付时 attrs 包含 `trade_no`、`amount`、`gateway_status`
 - `kind=append_log_failed`：流水写入失败（合规风险）
 - `kind=publish_status_cache_inconsistent`：缓存与状态不一致（用户可能轮询到错误状态）
 - `kind=poll_cache_get_failed`：缓存抖动（即将打爆 DB）

@@ -253,10 +253,15 @@ func (e *Engine[O]) handleCancelledPaidNotify(ctx context.Context, order O, noti
 	confirmed := buildConfirmedNotify(notify, query, channel)
 	e.normalizeNotifyPaidAt(&confirmed)
 
-	e.recordAnomaly(ctx, order, AnomalyPaidOnCancelled,
-		fmt.Sprintf("cancelled order paid: trade_no=%s amount=%d", confirmed.TransactionID, confirmed.TotalAmount))
 	e.appendLog(ctx, order, StatusCancelled, StatusCancelled, "system",
 		"paid after cancellation: trade_no="+confirmed.TransactionID)
+	e.recordAnomalyAttrs(ctx, order, AnomalyPaidOnCancelled,
+		fmt.Sprintf("cancelled order paid: trade_no=%s amount=%d", confirmed.TransactionID, confirmed.TotalAmount),
+		map[string]any{
+			"trade_no":       confirmed.TransactionID,
+			"amount":         confirmed.TotalAmount,
+			"gateway_status": string(query.TradeStatus),
+		})
 	return nil
 }
 

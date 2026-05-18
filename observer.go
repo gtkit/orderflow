@@ -38,7 +38,8 @@ import (
 //   - 所有方法必须非阻塞。Observer 调用位于 Engine 的热路径上，
 //     实现方做的 I/O（上报到 StatsD / Prometheus pushgateway / 发日志等）必须异步 +
 //     带缓冲 + 丢弃溢出样本。
-//   - 禁止 panic。Engine 不对 Observer 的实现加 recover；panic 会直接冲破调用链。
+//   - 禁止 panic。Engine.New 会用 safeObserver 包装非 nopObserver 实现并 recover panic，
+//     但 recover 只作为最后防线；panic 样本会丢失，并暴露 adapter 自身 bug。
 //   - 读取 ctx 中的 trace span 等值是允许的，但不得修改 ctx 生命周期。
 //
 // 默认实现（未注入时）是 nopObserver，零开销无分配。

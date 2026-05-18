@@ -10,11 +10,15 @@
 
 ### Changed
 
+- `AnomalyPaidOnCancelled` 的确认已支付路径现在先追加 `Cancelled -> Cancelled` 审计流水，再触发 `OnAnomaly`；Observer anomaly attributes 同步包含 `trade_no`、`amount`、`gateway_status`，便于退款 / 对账工单直接消费。
+
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+
+- 修正 `Observer` GoDoc 中关于 panic recover 的过期描述；Engine 已通过 `safeObserver` 包装非 nopObserver 实现，recover 作为最后防线，但业务 adapter 仍应保持非阻塞且不 panic。
 
 ### Security
 
