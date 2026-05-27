@@ -25,20 +25,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/modules.sh
+source "$(dirname "$0")/modules.sh"
+
 quiet=0
 if [[ "${1:-}" == "--quiet" ]]; then
     quiet=1
 fi
-
-# ========== 模块定义 ==========
-# 与 check-modules.sh 的 MODULES 保持一致；复制而非共享，避免脚本之间隐式耦合。
-MODULES=(
-    "orderflow|."
-    "gormstore|drivers/gormstore"
-    "paymgrgw|drivers/paymgrgw"
-    "rediscache|drivers/rediscache"
-    "rediszq|drivers/rediszq"
-)
 
 if ! command -v golangci-lint >/dev/null 2>&1; then
     echo "ERROR: golangci-lint not found in PATH" >&2
@@ -58,7 +51,7 @@ if [[ $quiet -eq 0 ]]; then
 fi
 
 for entry in "${MODULES[@]}"; do
-    IFS='|' read -r name path <<< "$entry"
+    IFS='|' read -r name path _tag_prefix <<< "$entry"
 
     # 跳过不存在的路径（如 driver 目录被删）
     if [[ ! -f "$path/go.mod" ]]; then

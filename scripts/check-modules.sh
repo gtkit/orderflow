@@ -24,21 +24,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/modules.sh
+source "$(dirname "$0")/modules.sh"
+
 quiet=0
 if [[ "${1:-}" == "--quiet" ]]; then
     quiet=1
 fi
-
-# ========== 模块定义 ==========
-# 格式：name|relative_path|tag_prefix
-# tag_prefix 是用 git tag -l 'PREFIX*' 找最新 tag 时的前缀
-MODULES=(
-    "orderflow|.|v"
-    "gormstore|drivers/gormstore|drivers/gormstore/v"
-    "paymgrgw|drivers/paymgrgw|drivers/paymgrgw/v"
-    "rediscache|drivers/rediscache|drivers/rediscache/v"
-    "rediszq|drivers/rediszq|drivers/rediszq/v"
-)
 
 # ========== 工具函数 ==========
 

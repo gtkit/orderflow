@@ -16,6 +16,24 @@
 
 ### Security
 
+## [1.12.1] - 2026-05-27
+
+### Added
+
+### Changed
+
+- 优化 Makefile 发布目标：`release` / `dry-release` 缺少 `VERSION` 时在 parse 阶段快速失败；`release-check` 去掉重复 `lint-all` 前置依赖，并将 race test 与 coverage 合并为一次 `-covermode=atomic` 测试；benchmark 目标改为 `-run=^$` 只跑基准；根模块 lint 显式使用 `GOWORK=off`；新增 `readiness`、`tidy`、`clean` target，`check` 保留为 `readiness` 兼容别名。
+- 收口多 module 发布工具维护面：新增 `scripts/modules.sh` 作为 lint / audit / release 脚本共享模块清单，并将 CI release-readiness job 统一为 `make release-check`。
+- `scripts/check-release.sh` 新增 `--skip-audit` 模式，供 tag 前质量门跳过“本次变更尚未发版”的模块审计；`make readiness` / `make check` 仍保留完整审计。
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [1.12.0] - 2026-05-18
 
 ### Added

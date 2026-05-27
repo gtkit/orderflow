@@ -127,6 +127,7 @@ orderflow/
 ├── examples/
 │   └── refund_quickstart/         # 退款自行编排示例：展示 RefundGateway 与业务退款记录/反向核销组合方式
 ├── scripts/
+│   ├── modules.sh                 # 多 module 元数据清单，供 lint / audit / release 脚本共享
 │   ├── lint-all.sh                # 多 module lint 入口，覆盖根 module 与 drivers/* 独立 module
 │   ├── check-modules.sh           # 检查 driver module 的 go.mod、replace、版本依赖等发布前约束
 │   ├── check-release.sh           # 发版前一键校验：driver readiness、lint 与模块审计
@@ -138,6 +139,7 @@ orderflow/
 ├── tools/openspec/                # OpenSpec hook 共用脚本、变更识别、健康检查与仓库校验工具
 ├── AGENTS.md                      # Codex/agent 项目级规则：Go 包质量、OpenSpec、文档、发布、安全要求
 ├── CLAUDE.md                      # Claude 项目级规则，通常与 AGENTS.md 保持同等约束语义
+├── Makefile                       # 本地质量门与发布辅助 target：release-check、readiness/check、tidy、clean 等（GOWORK=off）
 ├── README.md                      # 用户入口文档：适用场景、架构、接入步骤、流程图、运维和升级说明
 ├── CHANGELOG.md                   # Keep a Changelog 格式的用户可见变更记录，与 SemVer tag 强绑定
 ├── go.mod                         # 根 module：github.com/gtkit/orderflow，仅包含核心包依赖声明

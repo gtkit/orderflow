@@ -17,6 +17,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/modules.sh
+source "$(dirname "$0")/modules.sh"
+
 usage() {
     cat <<'USAGE'
 Usage:
@@ -139,16 +142,9 @@ if ! grep -qE "^## \[${version_no_v}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.
     exit 2
 fi
 
-driver_modules=(
-    "drivers/gormstore"
-    "drivers/paymgrgw"
-    "drivers/rediscache"
-    "drivers/rediszq"
-)
-
 root_tag="$version"
 driver_tags=()
-for path in "${driver_modules[@]}"; do
+for path in "${DRIVER_MODULES[@]}"; do
     if [[ ! -f "$path/go.mod" ]]; then
         echo "ERROR: module path '$path' has no go.mod" >&2
         exit 2
@@ -198,7 +194,7 @@ git push "$remote" "$root_tag"
 
 echo
 echo "==> Aligning driver require github.com/gtkit/orderflow $version"
-for path in "${driver_modules[@]}"; do
+for path in "${DRIVER_MODULES[@]}"; do
     echo "  $path"
     (cd "$path" && GOWORK=off go get "github.com/gtkit/orderflow@$version" && GOWORK=off go mod tidy)
 done
@@ -225,7 +221,7 @@ done
 
 echo
 echo "==> Running release checks"
-bash scripts/check-release.sh
+bash scripts/check-release.sh --skip-audit
 
 trap - ERR
 

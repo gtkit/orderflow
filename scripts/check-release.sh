@@ -15,6 +15,8 @@
 # 用法：
 #   scripts/check-release.sh         # 校验所有 driver
 #   scripts/check-release.sh --fix   # 自动跑 GOWORK=off go mod tidy 修复缺失（谨慎使用）
+#   scripts/check-release.sh --skip-audit
+#                                   # tag 前质量门：跳过"本次变更尚未发版"审计
 #
 # 退出码：0 通过；非 0 有遗漏
 
@@ -23,9 +25,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 mode="check"
-if [[ "${1:-}" == "--fix" ]]; then
-    mode="fix"
-fi
+skip_audit=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fix)
+            mode="fix"
+            shift
+            ;;
+        --skip-audit)
+            skip_audit=1
+            shift
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
 
 failed=0
 
@@ -87,7 +103,9 @@ fi
 # 这是发版前最容易遗漏的一步——单跑 check-modules.sh 也行。
 echo
 echo "---- module release audit ----"
-if ! bash "$(dirname "$0")/check-modules.sh" --quiet; then
+if [[ $skip_audit -eq 1 ]]; then
+    echo "SKIP: module release audit (tag-before-release quality gate)"
+elif ! bash "$(dirname "$0")/check-modules.sh" --quiet; then
     echo "ERROR: at least one module needs release (run scripts/check-modules.sh for details)"
     failed=1
 fi
