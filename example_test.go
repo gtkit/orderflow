@@ -96,6 +96,20 @@ func ExampleClosedReason() {
 	// 订单支付超时
 }
 
+// ExampleDefaultGenerateOrderNo 演示业务方如何在自定义 GenerateOrderNo 时复用默认生成器。
+func ExampleDefaultGenerateOrderNo() {
+	generateOrderNo := func(userID int64) string {
+		return "BIZ" + orderflow.DefaultGenerateOrderNo(userID)
+	}
+
+	orderNo := generateOrderNo(1001)
+	fmt.Println(orderNo[:3])
+	fmt.Println(len(orderNo))
+	// Output:
+	// BIZ
+	// 33
+}
+
 // ----- 下面是依赖 Engine 的文档型 Example：
 //   展示调用形式和错误处理模式，供 godoc 可见。
 //   由于 Engine 依赖完整的 Store / Gateway / DelayQueue / Cache / Stream，

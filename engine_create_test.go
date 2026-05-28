@@ -3,6 +3,7 @@ package orderflow
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +58,55 @@ func TestCreate_HappyPath_NewOrder(t *testing.T) {
 	mustLen(t, env.OnCreatedCalls, 1, "OnCreated")
 	mustLen(t, env.OnClosedCalls, 0, "OnClosed (should not fire)")
 	mustLen(t, env.OnSupersededCalls, 0, "OnSuperseded (should not fire)")
+}
+
+func TestCreate_CustomGenerateOrderNoReceivesUserIDAndPrefixesDefault(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	gw := newFakeGateway()
+	dq := newFakeDelayQueue()
+	cache := newFakeCache()
+	stream := newFakeStream()
+
+	var gotUserID int64
+	var generateCalls int
+	engine, err := New[*testOrder](Config[*testOrder]{
+		Store:      store,
+		Gateway:    gw,
+		DelayQueue: dq,
+		Cache:      cache,
+		Stream:     stream,
+		Logger:     nopLogger{},
+		GenerateOrderNo: func(userID int64) string {
+			generateCalls++
+			gotUserID = userID
+			return "BIZ" + DefaultGenerateOrderNo(userID)
+		},
+	})
+	mustNotErr(t, err, "New")
+
+	req := standardRequest()
+	req.UserID = 987654
+	result, err := engine.Create(ctx, req)
+	mustNotErr(t, err, "Create")
+
+	mustEqual(t, generateCalls, 1, "GenerateOrderNo calls")
+	mustEqual(t, gotUserID, req.UserID, "GenerateOrderNo userID")
+	if !strings.HasPrefix(result.Order.OrderNo(), "BIZ") {
+		t.Fatalf("order no %q should have business prefix", result.Order.OrderNo())
+	}
+	mustEqual(t, len(result.Order.OrderNo()), 33, "prefixed order no length")
+
+	created, found, err := store.GetByNo(ctx, result.Order.OrderNo())
+	mustNotErr(t, err, "Store.GetByNo")
+	if !found {
+		t.Fatalf("created order %q not found in store", result.Order.OrderNo())
+	}
+	mustEqual(t, created.UserID(), req.UserID, "created order userID")
+	mustEqual(t, store.CreateCalls, 1, "Store.CreateCalls")
+	mustEqual(t, gw.UnifiedOrderCalls, 1, "Gateway.UnifiedOrderCalls")
+	mustEqual(t, dq.EnqueueCalls, 1, "DelayQueue.EnqueueCalls")
+	mustEqual(t, cache.SetCalls, 1, "Cache.SetCalls")
 }
 
 func TestCreate_ReusePendingOrder(t *testing.T) {

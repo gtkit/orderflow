@@ -562,6 +562,23 @@ if err != nil {
 }
 ```
 
+如需给订单号加业务前缀，不要改库内默认生成器；在 `Config.GenerateOrderNo`
+中组合导出的默认 helper 即可。前缀后的总长度仍需满足你的订单表与支付渠道
+`out_trade_no` 长度限制。
+
+```go
+engine, err := orderflow.New[*myorder.Order](orderflow.Config[*myorder.Order]{
+    Store:      store,
+    Gateway:    gateway,
+    DelayQueue: dq,
+    Cache:      cache,
+    Stream:     stream,
+    GenerateOrderNo: func(userID int64) string {
+        return "BIZ" + orderflow.DefaultGenerateOrderNo(userID)
+    },
+})
+```
+
 ### Step 9 — 启动 worker
 
 ```go

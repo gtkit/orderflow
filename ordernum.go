@@ -24,6 +24,18 @@ const (
 
 var orderNoState atomic.Uint64
 
+// DefaultGenerateOrderNo 返回包默认订单号。
+//
+// 行为与 Config.GenerateOrderNo 为 nil 时 Engine 使用的生成器一致：
+// 当前格式为 <20 位毫秒时间戳><6 位 36 进制自增序列><4 位随机后缀>。
+// 返回值固定 30 字节。单进程内字典序等于生成顺序；多进程部署若需要机器 ID，
+// 仍应通过 Config.GenerateOrderNo 注入自定义生成器。
+//
+// userID 参数用于保持与 GenerateOrderNoFunc 签名一致；默认实现会忽略该参数。
+func DefaultGenerateOrderNo(userID int64) string {
+	return defaultGenerateOrderNo(userID)
+}
+
 // defaultGenerateOrderNo 是 Config.GenerateOrderNo 的默认实现。
 //
 // 格式：<20 位毫秒时间戳><6 位 36 进制自增序列><4 位随机后缀>
