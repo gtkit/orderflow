@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
-	github.com/gtkit/orderflow v1.12.1
+	github.com/gtkit/orderflow v1.13.0
 	github.com/redis/go-redis/v9 v9.19.0
 )
 
