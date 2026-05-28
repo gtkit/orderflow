@@ -6,15 +6,7 @@
 
 ### Added
 
-- 新增 `DefaultGenerateOrderNo(userID int64) string`，业务方可在 `Config.GenerateOrderNo` 中复用默认订单号生成器并拼接业务前缀，无需重写默认算法。
-- 新增 `OnPaidAfterCancelledHook` 与 `Config.OnPaidAfterCancelled`：`StatusCancelled` 订单被网关复核确认已支付且金额匹配时，Engine 保持 `Cancelled`，在审计流水与 `AnomalyPaidOnCancelled` 之后触发该结构化钩子，供业务方写入幂等退款 outbox / 对账工单。
-- 新增 `ErrOrderAlreadyPaid`：`CancelByUser` 在取消 CAS 抢输且复查发现订单已支付 / 已履约时返回该 sentinel，调用方可用 `errors.Is` 区分“支付已完成，不能取消”。
-- 新增 `AnomalyKind.Valid()`，便于调用方校验自定义输入或配置中的 anomaly 字面量。
-
 ### Changed
-
-- `Cancelled -> Paid` 确认已支付路径新增 per-engine `order_no + trade_no` 幂等抑制，避免同一回调重放重复触发 QueryOrder、审计流水、anomaly 与补偿钩子；跨进程退款幂等仍由业务方 outbox / 唯一键保证。
-- `scripts/release-all.sh --push` 在创建 / 推送 tag 前要求显式确认版本号；自动化可用 `--yes` 或 `RELEASE_CONFIRM=vX.Y.Z` 跳过交互。
 
 ### Deprecated
 
@@ -22,9 +14,28 @@
 
 ### Fixed
 
-- `scripts/check-modules.sh` 改用 `go list -m` 解析 driver 对 `github.com/gtkit/orderflow` 的直接依赖版本，并在缺失或解析不到时明确报告，避免版本审计漏报。
-
 ### Security
+
+## [1.13.0] - 2026-05-28
+
+### Added
+
+- 新增 `DefaultGenerateOrderNo(userID int64) string`，业务方可在 `Config.GenerateOrderNo` 中复用默认订单号生成器并拼接业务前缀，无需重写默认算法。
+- 新增 `OnPaidAfterCancelledHook` 与 `Config.OnPaidAfterCancelled`：`StatusCancelled` 订单被网关复核确认已支付且金额匹配时，Engine 保持 `Cancelled`，在审计流水与 `AnomalyPaidOnCancelled` 之后触发该结构化钩子，供业务方写入幂等退款 outbox / 对账工单。
+- 新增 `ErrOrderAlreadyPaid`：`CancelByUser` 在取消 CAS 抢输且复查发现订单已支付 / 已履约时返回该 sentinel，调用方可用 `errors.Is` 区分"支付已完成，不能取消"。
+- 新增 `AnomalyKind.Valid()`，便于调用方校验自定义输入或配置中的 anomaly 字面量。
+
+### Changed
+
+- `make release-check` 新增工作树清洁检查，默认拒绝已暂存、未暂存或未跟踪变更，避免在 `make tidy` 等命令生成未提交文件后误以为发版质量门已覆盖即将发布的提交；临时验证可显式设置 `ALLOW_DIRTY_RELEASE_CHECK=1` 跳过。
+- `Cancelled -> Paid` 确认已支付路径新增 per-engine `order_no + trade_no` 幂等抑制，避免同一回调重放重复触发 QueryOrder、审计流水、anomaly 与补偿钩子；跨进程退款幂等仍由业务方 outbox / 唯一键保证。
+- `scripts/release-all.sh --push` 在创建 / 推送 tag 前要求显式确认版本号；自动化可用 `--yes` 或 `RELEASE_CONFIRM=vX.Y.Z` 跳过交互。
+- `OnPaidAfterCancelledHook` 的 GoDoc 与包级 `doc.go` 显式声明 Engine 内部去重的边界：进程内 FIFO（上限 4096、不持久化、不跨实例），多实例部署 / 进程重启 / 挤兑场景下钩子可能被重复调用，业务方必须基于 `(orderNo, tradeNo)` 用 Redis SETNX、DB 唯一索引或业务自有持久化幂等表自行去重。
+
+### Fixed
+
+- `scripts/check-modules.sh` 改用 `go list -m` 解析 driver 对 `github.com/gtkit/orderflow` 的直接依赖版本，并在缺失或解析不到时明确报告，避免版本审计漏报。
+- 回溯补标 v1.12.0 `AnomalyPaidOnCancelled` 为破坏性变更（扩展 `AnomalyKind` 枚举），方便下游 `OnAnomalyHook` / 白名单告警逻辑感知新增的关键异常类型。
 
 ## [1.12.1] - 2026-05-27
 
@@ -45,6 +56,11 @@
 ### Security
 
 ## [1.12.0] - 2026-05-18
+
+> ⚠ **破坏性变更**：本版本扩展了 `AnomalyKind` 的枚举集合（新增 `AnomalyPaidOnCancelled`）。
+> 已实现 `OnAnomalyHook` 或基于 `AnomalyKind` 做 switch / 白名单告警的下游必须显式处理
+> 新值，否则会丢失 "已取消订单被确认支付" 这一关键异常的告警链路。无受影响的导出符号被
+> 删除或重命名；接口签名保持不变。
 
 ### Added
 

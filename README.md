@@ -132,13 +132,6 @@ orderflow/
 │   ├── check-modules.sh           # 检查 driver module 的 go.mod、replace、版本依赖等发布前约束
 │   ├── check-release.sh           # 发版前一键校验：driver readiness、lint 与模块审计
 │   └── release-all.sh             # 多 module 发布辅助脚本，按仓库约定统一处理 tag/release 流程
-├── .harness/                      # Harness 规范、Guide 与 error journal，约束包结构、错误、测试和文档质量
-├── .openspec-auto/                # OpenSpec 自动工作流状态，记录当前变更上下文与流程元信息
-├── .claude/                       # Claude/OpenSpec hook 与本地设置，用于自动注入项目流程约束
-├── .codex/                        # Codex/OpenSpec hook 与配置追加片段，用于本地 agent 工作流集成
-├── tools/openspec/                # OpenSpec hook 共用脚本、变更识别、健康检查与仓库校验工具
-├── AGENTS.md                      # Codex/agent 项目级规则：Go 包质量、OpenSpec、文档、发布、安全要求
-├── CLAUDE.md                      # Claude 项目级规则，通常与 AGENTS.md 保持同等约束语义
 ├── Makefile                       # 本地质量门与发布辅助 target：release-check、readiness/check、tidy、clean 等（GOWORK=off）
 ├── README.md                      # 用户入口文档：适用场景、架构、接入步骤、流程图、运维和升级说明
 ├── CHANGELOG.md                   # Keep a Changelog 格式的用户可见变更记录，与 SemVer tag 强绑定

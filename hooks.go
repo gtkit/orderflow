@@ -116,6 +116,26 @@ type OnCancelledHook[O OrderSnapshot] func(ctx context.Context, order O, reason 
 //
 // 触发顺序：Engine 已先追加 Cancelled -> Cancelled 流水并触发 AnomalyPaidOnCancelled，
 // 因此钩子内查询订单流水时可以看到这条审计记录。panic 会被 safeHook recover。
+//
+// # Engine 内部去重的边界（业务方必读）
+//
+// Engine 在调用本钩子前会做一层"进程内 FIFO 去重"——以 (orderNo, tradeNo) 为键、上限
+// 4096 条、按入队顺序淘汰旧条目。该机制**仅能**抵御以下场景：
+//
+//   - 同一进程实例上的回调重放（典型：网关短时间重复推送）；
+//   - 同一进程内首次查询失败、第二次重试到达。
+//
+// 它**无法**抵御以下场景，业务方必须自行实现跨实例幂等：
+//
+//   - **多实例部署**：每个进程的去重 map 独立。同一回调被 LB 分发到不同实例时，
+//     各实例都会判定为"首次"并独立调用本钩子；
+//   - **进程重启**：map 在内存中，重启后丢失。重启前已处理过的回调若再次到达会被视为首次；
+//   - **极端高并发挤兑**：4096 条 FIFO 上限被填满后，最旧条目会被淘汰，理论上极旧
+//     回调重新到达时会被视为首次（生产中极罕见，但不可忽视）。
+//
+// 因此**业务方必须**在钩子内基于 (orderNo, tradeNo) 用 Redis SETNX、DB 唯一索引或
+// 业务自有持久化幂等表自行去重；**不能**依赖 Engine 的内存去重作为生产幂等保证——
+// 它只是减少同实例下游噪声的"尽力而为"机制。
 type OnPaidAfterCancelledHook[O OrderSnapshot] func(ctx context.Context, order O, notify NotifyResult)
 
 // OnReopenedHook 已关闭的订单被支付网关确认成功、经 CASReopenPaid 恢复后触发。

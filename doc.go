@@ -34,6 +34,10 @@
 //
 // 详细约束（特别是 OnPaid 的幂等要求）见 hooks.go 的各钩子类型定义。
 // OnPaidAfterCancelled 只提供结构化补偿入口，核心包不会主动调用 RefundGateway.Refund。
+// Engine 内部对 OnPaidAfterCancelled 只做"单进程 FIFO 尽力而为"去重（上限 4096、不
+// 持久化、不跨实例）；多实例部署 / 进程重启 / FIFO 挤兑场景下钩子可能被重复调用，
+// 业务方必须基于 (orderNo, tradeNo) 用持久化幂等键（Redis SETNX / DB 唯一索引等）
+// 自行去重——详见 OnPaidAfterCancelledHook 的 GoDoc。
 //
 // # 履约时序
 //
