@@ -104,7 +104,7 @@ list_dep_updates() {
 require_orderflow_version() {
     local path="$1"
     if [[ "$path" == "." ]]; then return; fi
-    grep -E "^[[:space:]]+github\.com/gtkit/orderflow[[:space:]]" "$path/go.mod" 2>/dev/null | awk '{print $2}'
+    (cd "$path" && GOWORK=off go list -m -f '{{if not .Indirect}}{{.Version}}{{end}}' github.com/gtkit/orderflow 2>/dev/null)
 }
 
 # ========== 主流程 ==========
@@ -153,8 +153,10 @@ for entry in "${MODULES[@]}"; do
 
     # 检查 3：driver 的 require orderflow 是否对齐最新核心 tag
     if [[ "$path" != "." ]] && [[ -n "$ROOT_TAG" ]]; then
-        req_ver=$(require_orderflow_version "$path")
-        if [[ -n "$req_ver" ]] && [[ "$req_ver" != "$ROOT_TAG" ]]; then
+        req_ver=$(require_orderflow_version "$path" || true)
+        if [[ -z "$req_ver" ]]; then
+            issues+=("missing direct require github.com/gtkit/orderflow")
+        elif [[ "$req_ver" != "$ROOT_TAG" ]]; then
             issues+=("require orderflow $req_ver != latest core $ROOT_TAG")
         fi
     fi

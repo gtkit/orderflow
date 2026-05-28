@@ -105,6 +105,9 @@ type fakeStore struct {
 	// 模拟"订单在 CAS 期间被并发操作清理"（虽然 engine 不会这么做，但作为防御性测试）。
 	ConfirmPaidMakeDisappearOnce bool
 
+	// Race injection：CASCancel 第一次返回 0 并把订单状态改为指定值。
+	CancelRaceToStatus *OrderStatus
+
 	// PostCreate 允许测试在 Create 完成后再调整 order（模拟并发修改）
 	PostCreate func(*testOrder)
 }
@@ -281,6 +284,14 @@ func (s *fakeStore) CASCancel(_ context.Context, orderNo string) (int64, error) 
 	s.CASCancelCalls++
 	if s.ErrOnCAS != nil {
 		return 0, s.ErrOnCAS
+	}
+	if s.CancelRaceToStatus != nil {
+		target := *s.CancelRaceToStatus
+		s.CancelRaceToStatus = nil
+		if o, ok := s.byNo[orderNo]; ok {
+			o.status = target
+		}
+		return 0, nil
 	}
 	o, ok := s.byNo[orderNo]
 	if !ok || o.status != StatusPending {
@@ -691,6 +702,13 @@ type onCancelledCall struct {
 	Reason  string
 }
 
+type onPaidAfterCancelledCall struct {
+	OrderNo string
+	TradeNo string
+	Amount  int64
+	Channel Channel
+}
+
 type onSupersededCall struct {
 	OldOrderNo   string
 	NewProductID uint64
@@ -817,6 +835,7 @@ type testEnv struct {
 	OnDeliveredCalls               []string
 	OnClosedCalls                  []onClosedCall
 	OnCancelledCalls               []onCancelledCall
+	OnPaidAfterCancelledCalls      []onPaidAfterCancelledCall
 	OnReopenedCalls                []string
 	OnSupersededCalls              []onSupersededCall
 	OnSupersededGatewayFailedCalls []onSupersededGatewayFailedCall
@@ -875,6 +894,16 @@ func newTestEnv(t testing.TB) *testEnv {
 		OnCancelled: func(_ context.Context, o *testOrder, reason string) {
 			env.mu.Lock()
 			env.OnCancelledCalls = append(env.OnCancelledCalls, onCancelledCall{o.OrderNo(), reason})
+			env.mu.Unlock()
+		},
+		OnPaidAfterCancelled: func(_ context.Context, o *testOrder, n NotifyResult) {
+			env.mu.Lock()
+			env.OnPaidAfterCancelledCalls = append(env.OnPaidAfterCancelledCalls, onPaidAfterCancelledCall{
+				OrderNo: o.OrderNo(),
+				TradeNo: n.TransactionID,
+				Amount:  n.TotalAmount,
+				Channel: n.Channel,
+			})
 			env.mu.Unlock()
 		},
 		OnReopened: func(_ context.Context, o *testOrder, _ NotifyResult) {
@@ -959,6 +988,10 @@ func mustLen[T any](t *testing.T, got []T, want int, msg string) {
 	if len(got) != want {
 		t.Fatalf("%s: len=%d, want %d (got=%v)", msg, len(got), want, got)
 	}
+}
+
+func ptrStatus(s OrderStatus) *OrderStatus {
+	return &s
 }
 
 func attrString(t *testing.T, attrs map[string]any, key string) string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,6 +49,7 @@ type Config[O OrderSnapshot] struct {
 	OnDelivered                    OnDeliveredHook[O]
 	OnClosed                       OnClosedHook[O]
 	OnCancelled                    OnCancelledHook[O]
+	OnPaidAfterCancelled           OnPaidAfterCancelledHook[O]
 	OnReopened                     OnReopenedHook[O]
 	OnSuperseded                   OnSupersededHook[O]
 	OnSupersededGatewayCloseFailed OnSupersededGatewayCloseFailedHook[O]
@@ -126,10 +128,15 @@ type Engine[O OrderSnapshot] struct {
 	onDelivered                    OnDeliveredHook[O]
 	onClosed                       OnClosedHook[O]
 	onCancelled                    OnCancelledHook[O]
+	onPaidAfterCancelled           OnPaidAfterCancelledHook[O]
 	onReopened                     OnReopenedHook[O]
 	onSuperseded                   OnSupersededHook[O]
 	onSupersededGatewayCloseFailed OnSupersededGatewayCloseFailedHook[O]
 	onAnomaly                      OnAnomalyHook[O]
+
+	cancelledPaidMu        sync.Mutex
+	cancelledPaidSeen      map[string]struct{}
+	cancelledPaidSeenOrder []string
 
 	isReusable         IsReusableFunc[O]
 	resolveChannel     ResolveChannelFunc
@@ -203,6 +210,7 @@ func New[O OrderSnapshot](cfg Config[O]) (*Engine[O], error) {
 		onDelivered:                    cfg.OnDelivered,
 		onClosed:                       cfg.OnClosed,
 		onCancelled:                    cfg.OnCancelled,
+		onPaidAfterCancelled:           cfg.OnPaidAfterCancelled,
 		onReopened:                     cfg.OnReopened,
 		onSuperseded:                   cfg.OnSuperseded,
 		onSupersededGatewayCloseFailed: cfg.OnSupersededGatewayCloseFailed,
@@ -219,6 +227,7 @@ func New[O OrderSnapshot](cfg Config[O]) (*Engine[O], error) {
 		locker:                         cfg.Locker, // 可为 nil
 		createLockTTL:                  cmp.Or(cfg.CreateLockTTL, DefaultCreateLockTTL),
 		closeSupersededPolicy:          cfg.CloseSupersededPolicy,
+		cancelledPaidSeen:              make(map[string]struct{}),
 	}, nil
 }
 

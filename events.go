@@ -75,3 +75,26 @@ const (
 	// Observer.Event(EventAnomaly)。
 	AnomalyMalformedPaidNotify AnomalyKind = "malformed_paid_notify"
 )
+
+// Valid reports whether k is one of the AnomalyKind constants defined by this package.
+func (k AnomalyKind) Valid() bool {
+	switch k {
+	case AnomalyAmountMismatch,
+		AnomalyTradeNoMismatch,
+		AnomalyPaidOnClosed,
+		AnomalyPaidOnCancelled,
+		AnomalyOrderDisappeared,
+		AnomalyUnexpectedStatus,
+		AnomalyDeliveryFailed,
+		AnomalyGatewayQueryFailed,
+		AnomalyDelayQueueCleanupFailed,
+		AnomalyAppendLogFailed,
+		AnomalySupersededGatewayCloseFailed,
+		AnomalyRefundGatewayFailed,
+		AnomalyRefundDrift,
+		AnomalyMalformedPaidNotify:
+		return true
+	default:
+		return false
+	}
+}

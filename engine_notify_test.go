@@ -456,6 +456,11 @@ func TestHandleNotify_CancelledPaidConfirmedDoesNotReopenOrFinalize(t *testing.T
 	mustLen(t, env.OnDeliveredCalls, 0, "no OnDelivered")
 	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly")
 	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyPaidOnCancelled, "anomaly kind")
+	mustLen(t, env.OnPaidAfterCancelledCalls, 1, "OnPaidAfterCancelled")
+	mustEqual(t, env.OnPaidAfterCancelledCalls[0].OrderNo, "NO-CANCELLED-PAID", "compensation order")
+	mustEqual(t, env.OnPaidAfterCancelledCalls[0].TradeNo, "TXN-CANCELLED-PAID", "compensation trade")
+	mustEqual(t, env.OnPaidAfterCancelledCalls[0].Amount, int64(9900), "compensation amount")
+	mustEqual(t, env.OnPaidAfterCancelledCalls[0].Channel, Channel("wechat"), "compensation channel")
 	mustLen(t, env.store.logs, 1, "audit log")
 	mustEqual(t, env.store.logs[0].FromStatus, StatusCancelled, "log from")
 	mustEqual(t, env.store.logs[0].ToStatus, StatusCancelled, "log to")
@@ -467,6 +472,96 @@ func TestHandleNotify_CancelledPaidConfirmedDoesNotReopenOrFinalize(t *testing.T
 	mustEqual(t, attrString(t, ev.Attrs, "trade_no"), "TXN-CANCELLED-PAID", "observer trade_no")
 	mustEqual(t, attrInt64(t, ev.Attrs, "amount"), int64(9900), "observer amount")
 	mustEqual(t, attrString(t, ev.Attrs, "gateway_status"), string(TradeStatusPaid), "observer gateway_status")
+}
+
+func TestHandleNotify_CancelledPaidDuplicateConfirmedIsIdempotent(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:       "NO-CAN-DUP",
+		orderToken:    "T-CAN-DUP",
+		userID:        1001,
+		status:        StatusCancelled,
+		payAmount:     9900,
+		originalPrice: 9900,
+		payMethod:     PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CAN-DUP", 9900, "TXN-CAN-DUP")
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:    "NO-CAN-DUP",
+		TransactionID: "TXN-CAN-DUP",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+		Channel:       "wechat",
+	}
+
+	for range 2 {
+		mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify duplicate")
+	}
+
+	mustEqual(t, env.gw.QueryOrderCalls, 1, "duplicate skips gateway query")
+	mustLen(t, env.store.logs, 1, "only one audit log")
+	mustLen(t, env.OnAnomalyCalls, 1, "only one anomaly hook")
+	mustLen(t, env.OnPaidAfterCancelledCalls, 1, "only one compensation hook")
+	mustEqual(t, env.observer.countByKind(EventAnomaly), 1, "only one observer anomaly")
+}
+
+func TestHandleNotify_CancelledPaidNilCompensationHookIsNoop(t *testing.T) {
+	env := newTestEnv(t)
+	env.engine.onPaidAfterCancelled = nil
+	env.store.seed(&testOrder{
+		orderNo:       "NO-CAN-NIL-HOOK",
+		orderToken:    "T-CAN-NIL-HOOK",
+		userID:        1001,
+		status:        StatusCancelled,
+		payAmount:     9900,
+		originalPrice: 9900,
+		payMethod:     PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CAN-NIL-HOOK", 9900, "TXN-CAN-NIL-HOOK")
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:    "NO-CAN-NIL-HOOK",
+		TransactionID: "TXN-CAN-NIL-HOOK",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+		Channel:       "wechat",
+	}
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify")
+
+	mustLen(t, env.store.logs, 1, "audit log")
+	mustLen(t, env.OnAnomalyCalls, 1, "anomaly hook")
+	mustLen(t, env.OnPaidAfterCancelledCalls, 0, "no compensation hook")
+}
+
+func TestHandleNotify_CancelledPaidDifferentTradeNoNotSuppressed(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:       "NO-CAN-DIFF",
+		orderToken:    "T-CAN-DIFF",
+		userID:        1001,
+		status:        StatusCancelled,
+		payAmount:     9900,
+		originalPrice: 9900,
+		payMethod:     PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CAN-DIFF", 9900, "TXN-CAN-1")
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:    "NO-CAN-DIFF",
+		TransactionID: "TXN-CAN-1",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+		Channel:       "wechat",
+	}
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify first")
+
+	env.gw.NotifyResult = makeNotify("NO-CAN-DIFF", 9900, "TXN-CAN-2")
+	env.gw.QueryResp.TransactionID = "TXN-CAN-2"
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify second")
+
+	mustLen(t, env.store.logs, 2, "two audit logs")
+	mustLen(t, env.OnAnomalyCalls, 2, "two anomaly hooks")
+	mustLen(t, env.OnPaidAfterCancelledCalls, 2, "two compensation hooks")
+	mustEqual(t, env.OnPaidAfterCancelledCalls[1].TradeNo, "TXN-CAN-2", "second trade")
 }
 
 func TestHandleNotify_CancelledPaidOnAnomalySeesAuditLog(t *testing.T) {
@@ -526,6 +621,38 @@ func TestHandleNotify_CancelledButGatewayQueryKeepsFailing(t *testing.T) {
 	mustEqual(t, env.store.FinalizeCalls, 0, "no finalize")
 	mustLen(t, env.OnAnomalyCalls, 1, "OnAnomaly")
 	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyGatewayQueryFailed, "anomaly kind")
+}
+
+func TestHandleNotify_CancelledPaidQueryFailureAllowsLaterRetry(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:       "NO-CAN-QERR-RETRY",
+		orderToken:    "T-CAN-QERR-RETRY",
+		userID:        1001,
+		status:        StatusCancelled,
+		payAmount:     9900,
+		originalPrice: 9900,
+		payMethod:     PayMethodWechat,
+	})
+	env.gw.NotifyResult = makeNotify("NO-CAN-QERR-RETRY", 9900, "TXN-QERR-RETRY")
+	env.gw.QueryErr = errTestQueryDown
+
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify first")
+	mustLen(t, env.OnPaidAfterCancelledCalls, 0, "no compensation on query error")
+
+	env.gw.QueryErr = nil
+	env.gw.QueryResp = QueryResult{
+		OutTradeNo:    "NO-CAN-QERR-RETRY",
+		TransactionID: "TXN-QERR-RETRY",
+		TradeStatus:   TradeStatusPaid,
+		TotalAmount:   9900,
+		Channel:       "wechat",
+	}
+	mustNotErr(t, env.engine.HandleNotify(context.Background(), "wechat", makeHTTPNotifyRequest()), "HandleNotify retry")
+
+	mustLen(t, env.store.logs, 1, "audit log after retry")
+	mustLen(t, env.OnPaidAfterCancelledCalls, 1, "compensation after retry")
+	mustEqual(t, env.OnPaidAfterCancelledCalls[0].TradeNo, "TXN-QERR-RETRY", "trade")
 }
 
 func TestHandleNotify_CancelledQueryAmountMismatch(t *testing.T) {

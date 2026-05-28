@@ -60,6 +60,10 @@
 - [ ] **退款编排的反向核销逻辑必须幂等** —— 同一 `refund_id` 多次调用 `revokeBenefits` 结果一致。
   详见 [`examples/refund_quickstart/main.go`](./examples/refund_quickstart/main.go) 示例。
 
+- [ ] **`OnPaidAfterCancelled` 必须接入幂等退款 / 对账 outbox** —— `StatusCancelled` 订单被网关确认
+  已支付时，Engine 保持 Cancelled、不履约、不主动退款。业务方必须以 `(order_no, trade_no)` 为
+  唯一键写入退款 outbox 或人工对账工单；漏接会导致资金停留在支付渠道。
+
 - [ ] **`Store.AppendLog` 失败不阻断主流程但必须告警** —— 流水写入失败时 Engine 通过
   `AnomalyAppendLogFailed` 上报，业务侧必须配告警（合规风险）。
 

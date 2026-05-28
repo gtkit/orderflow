@@ -27,11 +27,13 @@
 //	OnDelivered      | error         | WARN 日志，不阻断，订单已 Delivered
 //	OnClosed         | (none)        | 旁路观察，无错误返回
 //	OnCancelled      | (none)        | 用户主动取消后的旁路观察，无错误返回
+//	OnPaidAfterCancelled | (none)    | 已取消订单又被确认支付后的退款/对账入口，无错误返回
 //	OnReopened       | (none)        | ⚠ 触发后 Engine 立刻调 OnPaid——禁止在此发权益（详见 OnReopenedHook GoDoc）
 //	OnSuperseded     | (none)        | 旁路观察
 //	OnAnomaly        | (none)        | 旁路观察，用于告警/审计
 //
 // 详细约束（特别是 OnPaid 的幂等要求）见 hooks.go 的各钩子类型定义。
+// OnPaidAfterCancelled 只提供结构化补偿入口，核心包不会主动调用 RefundGateway.Refund。
 //
 // # 履约时序
 //

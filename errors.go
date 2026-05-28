@@ -14,6 +14,9 @@ var (
 	ErrInvalidTransition = errors.New("orderflow: invalid status transition")
 	// ErrPaymentAmountMismatch 支付回调金额与订单金额不一致。
 	ErrPaymentAmountMismatch = errors.New("orderflow: payment amount mismatch")
+	// ErrOrderAlreadyPaid 表示用户取消订单时支付流程已抢先完成。
+	// 调用方应将该错误翻译为"订单已支付，不能取消"，而不是展示取消成功。
+	ErrOrderAlreadyPaid = errors.New("orderflow: order already paid")
 	// ErrMissingDep 构造 Engine 时必填依赖缺失（返回自 New / 配置校验）。
 	ErrMissingDep = errors.New("orderflow: required dependency missing")
 	// ErrInvalidConfig 配置字段非法（如 OrderExpire 为负）。

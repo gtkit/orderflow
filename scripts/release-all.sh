@@ -23,27 +23,35 @@ source "$(dirname "$0")/modules.sh"
 usage() {
     cat <<'USAGE'
 Usage:
-  scripts/release-all.sh vX.Y.Z [--push] [--remote <name>]
+  scripts/release-all.sh vX.Y.Z [--push] [--yes] [--remote <name>]
 
 Examples:
   scripts/release-all.sh v1.10.0
   scripts/release-all.sh v1.10.0 --push
+  scripts/release-all.sh v1.10.0 --push --yes
   scripts/release-all.sh v1.10.0 --push --remote origin
 
 Default mode is dry-run: it validates release preconditions and prints the
 release plan. Use --push to create annotated tags, align driver core requires,
 commit generated driver go.mod/go.sum changes when needed, and push everything.
+In --push mode, type the exact version at the confirmation prompt, or pass --yes
+only from trusted automation after reviewing the printed plan.
 USAGE
 }
 
 version=""
 remote="gtkit"
 push=0
+assume_yes=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --push)
             push=1
+            shift
+            ;;
+        --yes)
+            assume_yes=1
             shift
             ;;
         --remote)
@@ -176,6 +184,30 @@ if [[ $push -eq 0 ]]; then
     echo "Re-run with --push after committing release files."
     exit 0
 fi
+
+confirm_release_push() {
+    if [[ $assume_yes -eq 1 ]]; then
+        echo
+        echo "CONFIRMED: --yes supplied; proceeding with irreversible tag push."
+        return
+    fi
+    if [[ "${RELEASE_CONFIRM:-}" == "$version" ]]; then
+        echo
+        echo "CONFIRMED: RELEASE_CONFIRM=$version"
+        return
+    fi
+    echo
+    echo "WARNING: --push will create and push annotated tags to '$remote'."
+    echo "Remote tags must not be renamed, deleted, or force-overwritten after publication."
+    echo "Type the exact version '$version' to continue:"
+    read -r answer
+    if [[ "$answer" != "$version" ]]; then
+        echo "ERROR: release confirmation mismatch; aborting before tag creation" >&2
+        exit 2
+    fi
+}
+
+confirm_release_push
 
 message="版本 $version
 

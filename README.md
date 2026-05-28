@@ -172,6 +172,7 @@ orderflow/
 | `OnDelivered` | [`hooks.go`](./hooks.go) | WARN 日志，不阻断 |
 | `OnClosed` | [`hooks.go`](./hooks.go) | 旁路观察，无返回值 |
 | `OnCancelled` | [`hooks.go`](./hooks.go) | 用户主动取消后的旁路观察，无返回值 |
+| `OnPaidAfterCancelled` | [`hooks.go`](./hooks.go) | 已取消订单又被确认支付后的退款 / 对账入口，无返回值 |
 | `OnReopened` | [`hooks.go`](./hooks.go) | 旁路观察，仅在"关闭后又支付成功"路径触发 |
 | `OnSuperseded` | [`hooks.go`](./hooks.go) | 旁路观察 |
 | `OnAnomaly` | [`hooks.go`](./hooks.go) | 旁路观察，典型对接告警 |
@@ -462,6 +463,18 @@ onAnomaly := func(ctx context.Context, o *myorder.Order, kind orderflow.AnomalyK
 onCancelled := func(ctx context.Context, o *myorder.Order, reason string) {
     metrics.Counter("order.cancelled").With("reason", reason).Inc()
 }
+
+onPaidAfterCancelled := func(ctx context.Context, o *myorder.Order, n orderflow.NotifyResult) {
+    // 【退款幂等强约束】以 (orderNo, tradeNo) 为唯一键写入退款 outbox。
+    // 不要在这里直接发权益；订单已被用户取消，Engine 会保持 Cancelled。
+    refundOutbox.Enqueue(ctx, refundoutbox.Task{
+        OrderNo: o.OrderNo(),
+        TradeNo: n.TransactionID,
+        Amount:  n.TotalAmount,
+        Channel: n.Channel,
+        Reason:  "paid_after_cancelled",
+    })
+}
 ```
 
 ### Step 8 — 构造 `Engine`
@@ -512,12 +525,13 @@ engine, err := orderflow.New[*myorder.Order](orderflow.Config[*myorder.Order]{
     Stream:     stream,
 
     // ----- 业务钩子（可选） -----
-    OnPaid:       onPaid,
-    OnAnomaly:    onAnomaly,
-    OnClosed:     func(ctx context.Context, o *myorder.Order, reason orderflow.ClosedReason) { /* ... */ },
-    OnCancelled:  onCancelled, // v1.6.0+ 用户主动取消（区别于 OnClosed 系统型关闭）
-    OnReopened:   func(ctx context.Context, o *myorder.Order, n orderflow.NotifyResult) { /* ... */ },
-    OnSuperseded: func(ctx context.Context, old *myorder.Order, newProductID uint64) { /* ... */ },
+    OnPaid:               onPaid,
+    OnAnomaly:            onAnomaly,
+    OnClosed:             func(ctx context.Context, o *myorder.Order, reason orderflow.ClosedReason) { /* ... */ },
+    OnCancelled:          onCancelled,          // v1.6.0+ 用户主动取消（区别于 OnClosed 系统型关闭）
+    OnPaidAfterCancelled: onPaidAfterCancelled, // 取消后又支付成功：进入退款 / 对账 outbox
+    OnReopened:           func(ctx context.Context, o *myorder.Order, n orderflow.NotifyResult) { /* ... */ },
+    OnSuperseded:         func(ctx context.Context, old *myorder.Order, newProductID uint64) { /* ... */ },
 
     ResolveChannel: func(payMethod orderflow.PayMethod) orderflow.Channel {
         switch payMethod {
@@ -794,12 +808,12 @@ sequenceDiagram
 
 **处理策略**：
 - `HandleNotify` 看到 `StatusCancelled` + Paid notify 时，先调用 `QueryOrder` 复核网关真实状态。
-- 网关确认 Paid 且金额匹配：订单保持 `Cancelled`，先追加 `Cancelled -> Cancelled` 审计流水，再触发 `AnomalyPaidOnCancelled`，返回 nil 给网关。`OnAnomaly` 内查询流水时可以看到这条审计记录。
+- 网关确认 Paid 且金额匹配：订单保持 `Cancelled`，先追加 `Cancelled -> Cancelled` 审计流水，再触发 `AnomalyPaidOnCancelled`，随后触发 `OnPaidAfterCancelled`（如已配置），返回 nil 给网关。`OnAnomaly` / `OnPaidAfterCancelled` 内查询流水时可以看到这条审计记录。
 - 网关查询失败：记录 `AnomalyGatewayQueryFailed`，不恢复。
 - 网关金额不匹配：记录 `AnomalyAmountMismatch`，不恢复。
 - 网关未确认 Paid：记录 `AnomalyPaidOnCancelled`，不恢复。
 
-业务方应监听 `paid_on_cancelled` anomaly，进入退款、对账或人工处理流程。Observer 的 anomaly attributes 会包含 `trade_no`、`amount`、`gateway_status`，便于监控或工单系统直接建单。不要在 `OnAnomaly` 内直接补发权益；这会绕过用户取消意图。
+业务方必须把 `OnPaidAfterCancelled` 或 `paid_on_cancelled` anomaly 接入幂等退款、对账或人工处理流程。核心包不会主动调用 `RefundGateway.Refund`：退款记录、退款单号、反向核销、失败重试都属于业务编排。推荐以 `(order_no, trade_no)` 为唯一键写入退款 outbox，再由退款 worker 调 `RefundGateway.Refund`。Observer 的 anomaly attributes 会包含 `trade_no`、`amount`、`gateway_status`，便于监控或工单系统直接建单。不要在 `OnAnomaly` 或 `OnPaidAfterCancelled` 内补发权益；这会绕过用户取消意图。
 
 ### 其它异常路径（会触发 `OnAnomaly`）
 
@@ -808,7 +822,7 @@ sequenceDiagram
 | `AmountMismatch` | notify 金额 ≠ 订单金额 | 不推进状态，等人工介入 |
 | `TradeNoMismatch` | 同一订单不同 notify 出现不同 tradeNo | 不推进状态 |
 | `PaidOnClosed` | Closed 订单收到 notify，但网关查询非 Paid | 不 reopen，仅告警 |
-| `PaidOnCancelled` | Cancelled 订单收到 paid notify，网关复核后仍需对账 | 不恢复、不履约；记录流水并告警 |
+| `PaidOnCancelled` | Cancelled 订单收到 paid notify，网关复核后仍需对账 | 不恢复、不履约；记录流水并触发 `OnPaidAfterCancelled` 供业务退款 / 对账 |
 | `OrderDisappeared` | CAS 失败后 recheck 发现订单消失 | ALERT 日志 + 告警 |
 | `UnexpectedStatus` | 进入状态机未覆盖的分支 | 告警 |
 | `DeliveryFailed` | `OnPaid` 或 `FinalizePaidOrder` 失败 | 订单停在 Paid，`DeliveryFallback` 补偿 |
@@ -1040,7 +1054,7 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 
 ⚠ **鉴权强约束**：`userID` 必须来自鉴权后的可信身份（JWT Claims / Session），**禁止**直接接受请求体里的 `user_id`。Engine 内已校验 `order.UserID() == userID`，不匹配返回 `ErrOrderForbidden`。
 
-流程：身份校验 → 网关 `CloseOrder`（带重试 + 可忽略错误）→ `CASCancel` → `publishStatus` → `appendLog`（actor=`user`）→ `EventOrderCancelled` 事件 → `OnCancelled` 钩子。非 Pending 状态直接 skip 返回 nil（幂等）。
+流程：身份校验 → 网关 `CloseOrder`（带重试 + 可忽略错误）→ `CASCancel` → `publishStatus` → `appendLog`（actor=`user`）→ `EventOrderCancelled` 事件 → `OnCancelled` 钩子。非 Pending 状态直接 skip 返回 nil（幂等）；若 CASCancel 抢输且复查发现订单已进入 `Paid` / `Delivered` / `Completed`，返回 `ErrOrderAlreadyPaid`，调用方应展示“订单已支付，不能取消”而不是取消成功。
 
 取消后如果又收到支付成功回调，`HandleNotify` 会走 `StatusCancelled` 专用异常路径：向网关复核后仍保持 `Cancelled`，不恢复、不履约，由 `AnomalyPaidOnCancelled` 驱动退款 / 对账处理。
 

@@ -6,13 +6,22 @@
 
 ### Added
 
+- 新增 `OnPaidAfterCancelledHook` 与 `Config.OnPaidAfterCancelled`：`StatusCancelled` 订单被网关复核确认已支付且金额匹配时，Engine 保持 `Cancelled`，在审计流水与 `AnomalyPaidOnCancelled` 之后触发该结构化钩子，供业务方写入幂等退款 outbox / 对账工单。
+- 新增 `ErrOrderAlreadyPaid`：`CancelByUser` 在取消 CAS 抢输且复查发现订单已支付 / 已履约时返回该 sentinel，调用方可用 `errors.Is` 区分“支付已完成，不能取消”。
+- 新增 `AnomalyKind.Valid()`，便于调用方校验自定义输入或配置中的 anomaly 字面量。
+
 ### Changed
+
+- `Cancelled -> Paid` 确认已支付路径新增 per-engine `order_no + trade_no` 幂等抑制，避免同一回调重放重复触发 QueryOrder、审计流水、anomaly 与补偿钩子；跨进程退款幂等仍由业务方 outbox / 唯一键保证。
+- `scripts/release-all.sh --push` 在创建 / 推送 tag 前要求显式确认版本号；自动化可用 `--yes` 或 `RELEASE_CONFIRM=vX.Y.Z` 跳过交互。
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+
+- `scripts/check-modules.sh` 改用 `go list -m` 解析 driver 对 `github.com/gtkit/orderflow` 的直接依赖版本，并在缺失或解析不到时明确报告，避免版本审计漏报。
 
 ### Security
 

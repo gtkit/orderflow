@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const cancelledPaidSeenLimit = 4096
+
 // HandleNotify 处理支付网关的回调请求（典型场景：微信 / 支付宝异步通知）。
 //
 // 流程概要：
@@ -231,20 +233,32 @@ func (e *Engine[O]) recheckAfterCASFailed(ctx context.Context, notify NotifyResu
 func (e *Engine[O]) handleCancelledPaidNotify(ctx context.Context, order O, notify NotifyResult) error {
 	channel := e.resolveChannelOf(order.PayMethod())
 
+	if !e.claimCancelledPaid(order.OrderNo(), notify.TransactionID) {
+		e.logger.Info(ctx, "orderflow: duplicate paid-after-cancelled notify skipped",
+			String("order_no", order.OrderNo()),
+			String("trade_no", notify.TransactionID),
+		)
+		return nil
+	}
+	claimedTradeNo := notify.TransactionID
+
 	query, err := retryN(ctx, 3, 100*time.Millisecond, func() (QueryResult, error) {
 		return e.gateway.QueryOrder(ctx, channel, order.OrderNo())
 	})
 	if err != nil {
+		e.releaseCancelledPaid(order.OrderNo(), claimedTradeNo)
 		e.recordAnomaly(ctx, order, AnomalyGatewayQueryFailed, err.Error())
 		return nil
 	}
 
 	if query.TradeStatus != TradeStatusPaid {
+		e.releaseCancelledPaid(order.OrderNo(), claimedTradeNo)
 		e.recordAnomaly(ctx, order, AnomalyPaidOnCancelled,
 			fmt.Sprintf("cancelled order notify but gateway status=%s, skip", query.TradeStatus))
 		return nil
 	}
 	if query.TotalAmount != order.PayAmount() {
+		e.releaseCancelledPaid(order.OrderNo(), claimedTradeNo)
 		e.recordAnomaly(ctx, order, AnomalyAmountMismatch,
 			fmt.Sprintf("cancelled paid mismatch: gateway=%d order=%d", query.TotalAmount, order.PayAmount()))
 		return nil
@@ -252,6 +266,10 @@ func (e *Engine[O]) handleCancelledPaidNotify(ctx context.Context, order O, noti
 
 	confirmed := buildConfirmedNotify(notify, query, channel)
 	e.normalizeNotifyPaidAt(&confirmed)
+
+	if confirmed.TransactionID != claimedTradeNo {
+		e.rememberCancelledPaid(order.OrderNo(), confirmed.TransactionID)
+	}
 
 	e.appendLog(ctx, order, StatusCancelled, StatusCancelled, "system",
 		"paid after cancellation: trade_no="+confirmed.TransactionID)
@@ -262,7 +280,68 @@ func (e *Engine[O]) handleCancelledPaidNotify(ctx context.Context, order O, noti
 			"amount":         confirmed.TotalAmount,
 			"gateway_status": string(query.TradeStatus),
 		})
+	if e.onPaidAfterCancelled != nil {
+		e.safeHook(ctx, "OnPaidAfterCancelled", order.OrderNo(), func() {
+			e.onPaidAfterCancelled(ctx, order, confirmed)
+		})
+	}
 	return nil
+}
+
+func (e *Engine[O]) claimCancelledPaid(orderNo, tradeNo string) bool {
+	key := cancelledPaidKey(orderNo, tradeNo)
+	e.cancelledPaidMu.Lock()
+	defer e.cancelledPaidMu.Unlock()
+	if _, ok := e.cancelledPaidSeen[key]; ok {
+		return false
+	}
+	e.rememberCancelledPaidLocked(key)
+	return true
+}
+
+func (e *Engine[O]) rememberCancelledPaid(orderNo, tradeNo string) {
+	key := cancelledPaidKey(orderNo, tradeNo)
+	e.cancelledPaidMu.Lock()
+	defer e.cancelledPaidMu.Unlock()
+	e.rememberCancelledPaidLocked(key)
+}
+
+func (e *Engine[O]) rememberCancelledPaidLocked(key string) {
+	if e.cancelledPaidSeen == nil {
+		e.cancelledPaidSeen = make(map[string]struct{})
+	}
+	if _, ok := e.cancelledPaidSeen[key]; ok {
+		return
+	}
+	e.cancelledPaidSeen[key] = struct{}{}
+	e.cancelledPaidSeenOrder = append(e.cancelledPaidSeenOrder, key)
+	for len(e.cancelledPaidSeenOrder) > cancelledPaidSeenLimit {
+		old := e.cancelledPaidSeenOrder[0]
+		e.cancelledPaidSeenOrder = e.cancelledPaidSeenOrder[1:]
+		delete(e.cancelledPaidSeen, old)
+	}
+}
+
+func (e *Engine[O]) releaseCancelledPaid(orderNo, tradeNo string) {
+	key := cancelledPaidKey(orderNo, tradeNo)
+	e.cancelledPaidMu.Lock()
+	defer e.cancelledPaidMu.Unlock()
+	if _, ok := e.cancelledPaidSeen[key]; !ok {
+		return
+	}
+	delete(e.cancelledPaidSeen, key)
+	for i, v := range e.cancelledPaidSeenOrder {
+		if v != key {
+			continue
+		}
+		copy(e.cancelledPaidSeenOrder[i:], e.cancelledPaidSeenOrder[i+1:])
+		e.cancelledPaidSeenOrder = e.cancelledPaidSeenOrder[:len(e.cancelledPaidSeenOrder)-1]
+		return
+	}
+}
+
+func cancelledPaidKey(orderNo, tradeNo string) string {
+	return orderNo + "\x00" + tradeNo
 }
 
 // handleClosedPaidNotify 处理"订单已关闭但支付网关确认已支付"的竞态。

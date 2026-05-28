@@ -464,6 +464,43 @@ func TestCancelByUser_DelayQueueRemoveFailureEmitsAnomaly(t *testing.T) {
 	mustEqual(t, env.OnAnomalyCalls[0].Kind, AnomalyDelayQueueCleanupFailed, "anomaly kind")
 }
 
+func TestCancelByUser_ReturnsAlreadyPaidWhenPaymentWinsRace(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:   "C-PAID-RACE",
+		userID:    1001,
+		status:    StatusPending,
+		payMethod: PayMethodWechat,
+		expireAt:  time.Now().Add(time.Hour),
+	})
+	env.store.CancelRaceToStatus = ptrStatus(StatusPaid)
+
+	err := env.engine.CancelByUser(context.Background(), 1001, "C-PAID-RACE", "switch_payment")
+	if !errors.Is(err, ErrOrderAlreadyPaid) {
+		t.Fatalf("CancelByUser race: got %v, want ErrOrderAlreadyPaid", err)
+	}
+	mustLen(t, env.store.logs, 1, "race audit log")
+	mustEqual(t, env.store.logs[0].ToStatus, StatusPaid, "log to paid")
+	mustLen(t, env.OnCancelledCalls, 0, "no cancelled hook")
+}
+
+func TestCancelByUser_CancelledRaceRemainsIdempotent(t *testing.T) {
+	env := newTestEnv(t)
+	env.store.seed(&testOrder{
+		orderNo:   "C-CAN-RACE",
+		userID:    1001,
+		status:    StatusPending,
+		payMethod: PayMethodWechat,
+		expireAt:  time.Now().Add(time.Hour),
+	})
+	env.store.CancelRaceToStatus = ptrStatus(StatusCancelled)
+
+	mustNotErr(t, env.engine.CancelByUser(context.Background(), 1001, "C-CAN-RACE", ""), "CancelByUser cancelled race")
+	mustLen(t, env.store.logs, 1, "race audit log")
+	mustEqual(t, env.store.logs[0].ToStatus, StatusCancelled, "log to cancelled")
+	mustLen(t, env.OnCancelledCalls, 0, "no hook for race loser")
+}
+
 // delay-queue-cleanup-consistency：CloseByAdmin 成功路径必须清理延时队列。
 func TestCloseByAdmin_RemovesFromDelayQueue(t *testing.T) {
 	env := newTestEnv(t)

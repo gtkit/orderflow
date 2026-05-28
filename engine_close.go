@@ -187,6 +187,10 @@ func (e *Engine[O]) CancelByUser(ctx context.Context, userID int64, orderNo, rea
 		if ok {
 			e.appendLog(ctx, current, StatusPending, current.Status(), "user",
 				"cancel skipped: state changed concurrently to "+current.Status().String())
+			switch current.Status() {
+			case StatusPaid, StatusDelivered, StatusCompleted:
+				return ErrOrderAlreadyPaid
+			}
 		}
 		return nil
 	}

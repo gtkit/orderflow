@@ -104,6 +104,20 @@ type OnClosedHook[O OrderSnapshot] func(ctx context.Context, order O, reason Clo
 // Engine 不解析它，仅原样转发到本钩子与 audit log。
 type OnCancelledHook[O OrderSnapshot] func(ctx context.Context, order O, reason string)
 
+// OnPaidAfterCancelledHook 在已取消订单被网关确认已支付后触发。
+//
+// Engine 在此路径只做事实确认与告警：订单保持 StatusCancelled，不恢复、不履约，也不主动
+// 调 RefundGateway.Refund。调用方必须在本钩子内进入自己的幂等退款 outbox、对账工单或人工
+// 处理流程。退款单号 / outbox 建议以 (orderNo, notify.TransactionID) 为唯一键，避免网关
+// 重复回调、进程重启或多实例并发导致重复退款。
+//
+// 本钩子不返回 error。退款失败不能改变支付网关通知 ACK 语义；业务方应在自己的 outbox /
+// worker / 告警系统中重试并追踪失败。
+//
+// 触发顺序：Engine 已先追加 Cancelled -> Cancelled 流水并触发 AnomalyPaidOnCancelled，
+// 因此钩子内查询订单流水时可以看到这条审计记录。panic 会被 safeHook recover。
+type OnPaidAfterCancelledHook[O OrderSnapshot] func(ctx context.Context, order O, notify NotifyResult)
+
 // OnReopenedHook 已关闭的订单被支付网关确认成功、经 CASReopenPaid 恢复后触发。
 //
 // **⚠ 重要：此钩子触发后 Engine 会立刻调用 OnPaid + OnDelivered**

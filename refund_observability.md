@@ -2,8 +2,8 @@
 
 核心包**不参与退款编排**（见 `refund_gateway.go` 的设计说明）。但为了让跨项目监控
 能用同一套 dashboard 看退款指标，核心包提供推荐的 `EventKind` / `AnomalyKind` 常量
-和 attribute schema。业务方在自己的退款编排代码里调 `Observer.Event` 时使用这些常量
-即可。
+和 attribute schema。`EventKind` 常量定义在 `observer.go`，`AnomalyKind` 常量定义在
+`events.go`；业务方在自己的退款编排代码里调 `Observer.Event` 时使用这些常量即可。
 
 ## 事件列表与 emit 时机
 
